@@ -52,7 +52,7 @@ DEFAULT_MATERIALS: list[Material] = [
     Material("Skin", 0.35, 0.65, 0.30, "#e0ac69", "High water content; lossy dielectric."),
     Material("Tire rubber", 0.25, 0.70, 0.30, "#1e1e1e", "Carbon-black loaded rubber."),
     Material("Saddle foam / leather", 0.08, 0.30, 0.30, "#5a3a22", ""),
-    Material("ABS / hard plastic", 0.05, 0.03, 0.05, "#e8e8e8", "Low-loss dielectric; mostly transparent."),
+    Material("ABS / hard plastic", 0.05, 0.03, 0.05, "#9a9a94", "Low-loss dielectric; mostly transparent."),
     Material("Polycarbonate", 0.06, 0.02, 0.02, "#cfe8ff", "Lens and light housings."),
     Material("Nylon fabric", 0.02, 0.05, 0.30, "#c46b3a", "Bags and panniers (dry)."),
     Material("Metallized fabric", 0.90, 0.08, 0.30, "#d4d48a", "Conductive textile."),

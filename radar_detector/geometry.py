@@ -252,6 +252,14 @@ def load_mesh(path: str | Path, units: str = "mm") -> pv.PolyData:
     return mesh
 
 
+def guess_units(raw_extent: float) -> str:
+    """Pick the unit that makes a part's largest dimension a plausible bike accessory (2cm-2m)."""
+    for units in ("mm", "cm", "in", "m"):
+        if 0.02 <= raw_extent * UNIT_SCALES[units] <= 2.0:
+            return units
+    return "mm"
+
+
 def make_attachment(name: str, mesh: pv.PolyData, mat_index: int, biker_present: bool) -> SceneObject:
     obj = SceneObject(name, mesh, np.full(mesh.n_cells, mat_index, dtype=int))
     obj.position = DEFAULT_ATTACH_POINT.copy() if biker_present else np.array([0.5, 0.0, 0.8])

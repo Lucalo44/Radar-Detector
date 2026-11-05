@@ -608,22 +608,31 @@ class MainWindow(QtWidgets.QMainWindow):
         path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Import geometry", str(Path.home()), MESH_FILTER)
         if not path:
             return
-        units, ok = QtWidgets.QInputDialog.getItem(
-            self, "Units", "What units is this file in?", list(geo.UNIT_SCALES), 2, False)
-        if not ok:
-            return
         try:
             QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-            mesh = geo.load_mesh(path, units)
+            mesh = geo.load_mesh(path, "m")  # raw file units; scaled below once the user confirms units
         except Exception as e:  # noqa: BLE001
             QtWidgets.QApplication.restoreOverrideCursor()
             QtWidgets.QMessageBox.critical(self, "Import failed", f"Could not read {path}:\n{e}")
             return
         QtWidgets.QApplication.restoreOverrideCursor()
-        size = np.ptp(np.asarray(mesh.points), axis=0)
+        raw = np.ptp(np.asarray(mesh.points), axis=0)
+        unit_names = list(geo.UNIT_SCALES)
+        guess = geo.guess_units(float(raw.max()))
+        units, ok = QtWidgets.QInputDialog.getItem(
+            self, "Units",
+            f"Part spans {raw[0]:.3g} × {raw[1]:.3g} × {raw[2]:.3g} file units.\nWhat units is this file in?",
+            unit_names, unit_names.index(guess), False)
+        if not ok:
+            return
+        mesh.points = mesh.points * geo.UNIT_SCALES[units]
+        size = raw * geo.UNIT_SCALES[units]
         if size.max() > 3:
             QtWidgets.QMessageBox.warning(self, "Large part",
                 f"This part is {size.max():.2f} m across. If that's wrong, re-import with different units or use Scale.")
+        elif size.max() < 0.02:
+            QtWidgets.QMessageBox.warning(self, "Tiny part",
+                f"This part is only {size.max() * 1000:.1f} mm across. If that's wrong, re-import with different units or use Scale.")
         if mesh.n_cells > 300_000:
             QtWidgets.QMessageBox.information(self, "Dense mesh",
                 f"{mesh.n_cells:,} triangles. This will work but computes slowly; decimating in your CAD tool helps.")
