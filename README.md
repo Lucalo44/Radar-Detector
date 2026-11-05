@@ -44,15 +44,17 @@ The tool has two modes, from simplest to most involved:
 
 1. **Simple mode.** The radar sits directly behind the rider with a 20° cone and multi-bounce on.
    1. Click **Import geometry…** to load an STL, OBJ, PLY, VTK or glTF file and pick its units. Alternatively, use **Add sample** to drop in a corner reflector, flat plate or sphere.
-   2. Place it with Position, Rotation and Scale (+X is the direction of travel, +Y is the rider's left, +Z is up). Then pick its material.
+   2. Imports start flush against the back of the rider's head, which is where a helmet accessory would sit. Move it with Position, Rotation and Scale (+X is the direction of travel, +Y is the rider's left, +Z is up). Then pick its material.
    3. Set the distance with the slider. The result panel shows **Returning radar power** (the percentage of transmitted power that gets back to the radar) and **Total radar cross section** (in m² and dBsm).
-   4. Uncheck **Show baseline biker** to analyze the geometry by itself.
+   4. Untick an imported part in the geometry list to leave it out without deleting it. This makes it easy to flip back and forth and see what the part adds. **Delete** removes it for good.
+   5. Uncheck **Show baseline biker** to analyze the geometry by itself.
 2. **Advanced mode** adds everything else:
    1. Radar settings: cone width, distance, angle of incidence (0° from behind, 90° from the rider's left, 180° head-on), elevation, and the multi-bounce bounce count and ray spacing.
-   2. Face-level materials. Tick **Pick faces with the mouse**, then click a face to toggle it. Shift+click selects the whole smooth region around a face (the grow angle sets how smooth). Choose a material, adjust its R, A and roughness if needed, and click **Assign to selected faces**. **Save as new material…** keeps a custom material for reuse.
+   2. Face-level materials. Click a surface in the 3D view to select it. A surface ends wherever neighboring faces bend by more than the edge angle (20° by default). Shift+click adds or removes a surface, Option+click toggles a single triangle, and clicking empty space clears the selection. Choose a material, adjust its R, A and roughness if needed, and click **Assign to selected faces**. **Save as new material…** keeps a custom material for reuse.
    3. A breakdown into specular, diffuse and multi-bounce RCS, a beam energy budget, and an RCS table for each object.
    4. **Show per-face RCS heat map** paints each face by its contribution, which shows exactly which surface is doing the reflecting.
    5. **Aspect sweep 0–360°** plots RCS against the angle of incidence on a polar chart, with a table and CSV export.
+   6. **Save comparison charts…** computes returned power from 2m to 50m (2m steps) from the rear, both sides and the front. It runs the biker alone and the biker with every ticked attachment, aimed at the same point. It saves a four-panel chart of both cases, a chart of the difference in dB, and a CSV of every value. Expect about 45s.
 
 To demo this, add the sample corner reflector in Simple mode. At 10m the rider jumps from +1.3dBsm to +14.2dBsm, a 10cm piece of aluminum outshining the entire bike and rider by about 13dB.
 

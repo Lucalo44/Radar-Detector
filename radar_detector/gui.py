@@ -151,6 +151,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.result: RcsResult | None = None
         self.spans: list = []
         self.actor_map: dict[str, geo.SceneObject] = {}
+        self.mesh_map: dict[int, pv.PolyData] = {}  # id(obj) -> rendered mesh, for in-place recolouring
         self._adj_cache: dict[int, tuple] = {}
         self._press_pos = None
         self._first_render = True
@@ -198,9 +199,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build_results_box()
         self.panel_layout.addStretch()
 
+        # Mouse observers go on the interactor *style*: pyvista's style grabs focus on button-down, after which
+        # the interactor delivers the release only to the style, so an interactor observer never sees it.
         iren = self.plotter.iren.interactor
-        iren.AddObserver("LeftButtonPressEvent", self._on_lpress, 10.0)
-        iren.AddObserver("LeftButtonReleaseEvent", self._on_lrelease, 10.0)
+        style = self.plotter.iren.style
+        style.AddObserver("LeftButtonPressEvent", lambda *_: self._on_lpress(iren, None))
+        style.AddObserver("LeftButtonReleaseEvent", lambda *_: self._on_lrelease(iren, None))
+        # An observer on the style replaces its default wheel handler (which dollies toward the focal point)
+        style.AddObserver("MouseWheelForwardEvent", lambda *_: self._zoom_at_cursor(1.2))
+        style.AddObserver("MouseWheelBackwardEvent", lambda *_: self._zoom_at_cursor(1 / 1.2))
 
         self.refresh_object_list()
         self.apply_mode()
@@ -237,7 +244,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.obj_list = QtWidgets.QListWidget()
         self.obj_list.setMaximumHeight(130)
         self.obj_list.currentRowChanged.connect(self._on_object_selected)
+        self.obj_list.itemChanged.connect(self._on_item_checked)
         lay.addWidget(self.obj_list)
+        hint = QtWidgets.QLabel("Tick or untick an imported part to include or exclude it.")
+        hint.setStyleSheet(MUTED)
+        lay.addWidget(hint)
 
         row = QtWidgets.QHBoxLayout()
         b_imp = QtWidgets.QPushButton("Import geometry…")
@@ -252,7 +263,7 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addAction("Sphere (10 cm dia., aluminum)", lambda: self.add_sample("sphere"))
         b_sample.setMenu(menu)
         row.addWidget(b_sample)
-        self.b_remove = QtWidgets.QPushButton("Remove")
+        self.b_remove = QtWidgets.QPushButton("Delete")
         self.b_remove.clicked.connect(self.remove_object)
         row.addWidget(self.b_remove)
         lay.addLayout(row)
@@ -335,22 +346,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_faces_box(self):
         self.faces_box = g = self._group("Face materials (Advanced)")
         lay = QtWidgets.QVBoxLayout(g)
-        self.pick_check = QtWidgets.QCheckBox("Pick faces with the mouse")
-        self.pick_check.toggled.connect(lambda _: self.refresh_scene())
-        lay.addWidget(self.pick_check)
-        hint = QtWidgets.QLabel("Click toggles one face. Shift+click selects the smooth region around it "
-                                "(faces within the grow angle). Drag still rotates the view.")
+        hint = QtWidgets.QLabel("Click a surface in the 3D view to select it. Shift+click adds or removes a surface, "
+                                "Option/Alt+click toggles a single triangle, and clicking empty space clears. "
+                                "Drag still rotates the view.")
         hint.setWordWrap(True)
         hint.setStyleSheet(MUTED)
         lay.addWidget(hint)
 
         row = QtWidgets.QHBoxLayout()
         self.grow_angle = _dspin(0.5, 90, 20, 1, 1, "°")
-        b_grow = QtWidgets.QPushButton("Grow selection")
-        b_grow.clicked.connect(self.grow_selection)
-        row.addWidget(b_grow)
-        row.addWidget(QtWidgets.QLabel("angle"))
+        self.grow_angle.setToolTip("A surface ends where neighbouring faces bend by more than this angle.")
+        row.addWidget(QtWidgets.QLabel("Surface edge angle:"))
         row.addWidget(self.grow_angle)
+        row.addStretch()
         lay.addLayout(row)
         row = QtWidgets.QHBoxLayout()
         for text, fn in (("Select object", self.select_object_faces), ("Select by material", self.select_by_material),
@@ -444,6 +452,11 @@ class MainWindow(QtWidgets.QMainWindow):
         b_sweep.clicked.connect(self.sweep)
         row.addWidget(b_sweep)
         al.addLayout(row)
+        b_charts = QtWidgets.QPushButton("Save comparison charts…")
+        b_charts.setToolTip("Returned power vs. distance (2-50 m) from the rear, both sides and the front, "
+                            "for the biker alone and with the ticked attachments. Saves two PNGs and a CSV.")
+        b_charts.clicked.connect(self.save_charts)
+        al.addWidget(b_charts)
         lay.addWidget(self.adv_results)
         self.notes = QtWidgets.QLabel("")
         self.notes.setWordWrap(True)
@@ -508,10 +521,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.faces_box.setVisible(adv)
         self.adv_results.setVisible(adv)
         if not adv:
-            self.pick_check.setChecked(False)
             self.heat_check.setChecked(False)
             self.clear_selection(refresh=False)
-        self.view_hint.setText("Advanced: tick 'Pick faces' to select faces by clicking." if adv else "Simple mode")
+        self.view_hint.setText("Advanced: click a surface to select it" if adv else "Simple mode: click an object to select it")
         self.refresh_object_list()
         self._schedule()
 
@@ -537,12 +549,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.obj_list.blockSignals(True)
         self.obj_list.clear()
         for o in self.objects():
-            if not o.visible:
+            if o.builtin and not o.visible:
                 continue
             it = QtWidgets.QListWidgetItem(f"{o.name}  ·  {o.n_faces:,} faces")
             it.setData(QtCore.Qt.UserRole, o)
             if o.builtin:
                 it.setText(it.text() + "  (baseline)" if "(baseline)" not in o.name else it.text())
+            else:  # attachments get an include checkbox, so their effect can be toggled on and off
+                it.setFlags(it.flags() | QtCore.Qt.ItemIsUserCheckable)
+                it.setCheckState(QtCore.Qt.Checked if o.visible else QtCore.Qt.Unchecked)
+                it.setToolTip("Untick to leave this part out of the scene and the result without deleting it.")
             self.obj_list.addItem(it)
         self.obj_list.blockSignals(False)
         rows = [self.obj_list.item(i).data(QtCore.Qt.UserRole) for i in range(self.obj_list.count())]
@@ -553,6 +569,18 @@ class MainWindow(QtWidgets.QMainWindow):
         elif rows:
             self.obj_list.setCurrentRow(0)
         self._on_object_selected()
+
+    def _on_item_checked(self, item: QtWidgets.QListWidgetItem):
+        o = item.data(QtCore.Qt.UserRole)
+        if o is None or o.builtin:
+            return
+        visible = item.checkState() == QtCore.Qt.Checked
+        if visible != o.visible:
+            o.visible = visible
+            if not visible:
+                self.selection.pop(id(o), None)
+                self._update_sel_label()
+            self._schedule()
 
     def _on_object_selected(self, *_):
         o = self.current_object()
@@ -636,7 +664,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if mesh.n_cells > 300_000:
             QtWidgets.QMessageBox.information(self, "Dense mesh",
                 f"{mesh.n_cells:,} triangles. This will work but computes slowly; decimating in your CAD tool helps.")
-        obj = geo.make_attachment(Path(path).stem, mesh, self.lib.index("ABS / hard plastic"), self.cb_biker.isChecked())
+        obj = geo.make_attachment(Path(path).stem, mesh, self.lib.index("ABS / hard plastic"), self.cb_biker.isChecked(),
+                                  mount="head")
         self.attachments.append(obj)
         self.refresh_object_list(select=obj)
         self.fit_view(False)
@@ -697,14 +726,6 @@ class MainWindow(QtWidgets.QMainWindow):
         labels = self._adjacency_labels(obj, self.grow_angle.value())
         return set(np.nonzero(np.isin(labels, labels[list(seeds)]))[0].tolist())
 
-    def grow_selection(self):
-        for oid, faces in list(self.selection.items()):
-            obj = self._obj_by_id(oid)
-            if obj is not None and faces:
-                self.selection[oid] = self._grow(obj, faces)
-        self._update_sel_label()
-        self.refresh_scene()
-
     def select_object_faces(self):
         o = self.current_object()
         if o is not None:
@@ -730,34 +751,90 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_lpress(self, iren, _evt):
         self._press_pos = iren.GetEventPosition()
 
-    def _on_lrelease(self, iren, _evt):
-        if not (self.advanced and self.pick_check.isChecked()) or self._press_pos is None:
-            return
-        x, y = iren.GetEventPosition()
-        if abs(x - self._press_pos[0]) + abs(y - self._press_pos[1]) > 4:
-            return  # it was a drag (rotate), not a click
+    def _pick(self, x: int, y: int):
         picker = vtkCellPicker()
         picker.SetTolerance(0.0005)
         if not picker.Pick(x, y, 0, self.plotter.renderer):
-            return
+            return None, -1
         actor, cell = picker.GetActor(), picker.GetCellId()
         if actor is None or cell < 0:
+            return None, -1
+        return self.actor_map.get(actor.GetAddressAsString("vtkObject")), cell
+
+    def _on_lrelease(self, iren, _evt):
+        if self._press_pos is None:
             return
-        obj = self.actor_map.get(actor.GetAddressAsString("vtkObject"))
+        x, y = iren.GetEventPosition()
+        px, py = self._press_pos
+        self._press_pos = None
+        if abs(x - px) + abs(y - py) > 4:
+            return  # it was a drag (rotate), not a click
+        obj, cell = self._pick(x, y)
+        if obj is not None:
+            rows = [self.obj_list.item(i).data(QtCore.Qt.UserRole) for i in range(self.obj_list.count())]
+            if obj in rows and self.current_object() is not obj:
+                self.obj_list.setCurrentRow(rows.index(obj))
+        if not self.advanced:
+            return
+        # pyvistaqt doesn't forward Alt/Option to VTK, so read modifiers from Qt directly
+        mods = QtWidgets.QApplication.keyboardModifiers()
+        shift = bool(mods & QtCore.Qt.ShiftModifier)
+        alt = bool(mods & QtCore.Qt.AltModifier)
         if obj is None:
+            if not (shift or alt) and self.selection:
+                self.clear_selection(refresh=False)
+                self._recolor()
             return
-        sel = self.selection.setdefault(id(obj), set())
-        if iren.GetShiftKey():
-            sel |= self._grow(obj, [cell])
-        elif cell in sel:
-            sel.discard(cell)
+        surface = {cell} if alt else self._grow(obj, [cell])
+        if shift or alt:  # toggle this surface in or out of the selection
+            sel = self.selection.setdefault(id(obj), set())
+            if surface <= sel:
+                sel -= surface
+            else:
+                sel |= surface
         else:
-            sel.add(cell)
-        rows = [self.obj_list.item(i).data(QtCore.Qt.UserRole) for i in range(self.obj_list.count())]
-        if obj in rows and self.current_object() is not obj:
-            self.obj_list.setCurrentRow(rows.index(obj))
+            self.selection = {id(obj): surface}
         self._update_sel_label()
-        self.refresh_scene()
+        self._recolor()
+
+    def _zoom_at_cursor(self, factor: float):
+        """Dolly toward (factor > 1) or away from the point under the cursor, keeping that point fixed on screen."""
+        ren = self.plotter.renderer
+        cam = ren.GetActiveCamera()
+        x, y = self.plotter.iren.interactor.GetEventPosition()
+        picker = vtkCellPicker()
+        picker.SetTolerance(0.0005)
+        if picker.Pick(x, y, 0, ren) and picker.GetCellId() >= 0:
+            target = np.array(picker.GetPickPosition())
+        else:  # empty space: use the point under the cursor at the focal-plane depth
+            ren.SetWorldPoint(*cam.GetFocalPoint(), 1.0)
+            ren.WorldToDisplay()
+            z = ren.GetDisplayPoint()[2]
+            ren.SetDisplayPoint(x, y, z)
+            ren.DisplayToWorld()
+            w = np.array(ren.GetWorldPoint())
+            target = w[:3] / w[3]
+        pos, fp = np.array(cam.GetPosition()), np.array(cam.GetFocalPoint())
+        cam.SetPosition(*(target + (pos - target) / factor))
+        cam.SetFocalPoint(*(target + (fp - target) / factor))
+        ren.ResetCameraClippingRange()
+        self.plotter.render()
+
+    def _recolor(self):
+        """Repaint material colours and the selection highlight without rebuilding the scene."""
+        _, _, _, rgb_lib = self.lib.arrays()
+        for obj in self.visible_objects():
+            m = self.mesh_map.get(id(obj))
+            if m is None:  # heat map is showing, or the scene is stale
+                self.refresh_scene()
+                return
+            colors = rgb_lib[obj.face_mat].copy()
+            sel = self.selection.get(id(obj))
+            if sel:
+                colors[list(sel)] = HIGHLIGHT
+            m.cell_data["colors"][:] = colors
+            m.Modified()
+        self.plotter.render()
 
     # ------------------------------------------------------------------ #
     # Materials (advanced)
@@ -860,6 +937,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cam = None if self._first_render else p.camera_position
         p.clear()
         self.actor_map = {}
+        self.mesh_map = {}
         _, _, _, rgb_lib = self.lib.arrays()
         adv = self.advanced
         heat = adv and self.heat_check.isChecked() and self.result is not None
@@ -884,9 +962,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if sel:
                     colors[list(sel)] = HIGHLIGHT
                 m.cell_data["colors"] = colors
-                show_edges = adv and self.pick_check.isChecked()
-                actor = p.add_mesh(m, scalars="colors", rgb=True, show_edges=show_edges, edge_color="#6b6b6b",
-                                   line_width=0.3, ambient=0.25, diffuse=0.8, specular=0.15)
+                actor = p.add_mesh(m, scalars="colors", rgb=True, ambient=0.25, diffuse=0.8, specular=0.15)
+                self.mesh_map[id(obj)] = m
             self.actor_map[actor.GetAddressAsString("vtkObject")] = obj
 
         # ---- radar, beam cone, distance ----
@@ -972,6 +1049,54 @@ class MainWindow(QtWidgets.QMainWindow):
             dlg.setValue(i + 1)
             QtWidgets.QApplication.processEvents()
         SweepDialog(self, az, out, base.azimuth_deg, base.distance_m).exec()
+
+
+    # ------------------------------------------------------------------ #
+    # Comparison charts
+    # ------------------------------------------------------------------ #
+    def save_charts(self):
+        from .charts import ASPECTS, save_comparison
+
+        parts = [o for o in self.attachments if o.visible]
+        if not parts:
+            QtWidgets.QMessageBox.information(self, "No attachments",
+                "Import or add a part (and leave it ticked) to compare against the biker alone.")
+            return
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Save charts to folder", str(Path.home()))
+        if not folder:
+            return
+        for o in self.biker:
+            o.visible = True  # the baseline is always the full biker, even if it's hidden in the view
+        try:
+            base_t, _ = geo.build_target(self.biker, self.lib)
+            with_t, _ = geo.build_target(self.biker + parts, self.lib)
+            # Same aim point for both runs, so the only difference is the attachments
+            b = np.array([o.world_mesh().bounds for o in self.biker])
+            aim = 0.5 * (np.array([b[:, 0].min(), b[:, 2].min(), b[:, 4].min()])
+                         + np.array([b[:, 1].max(), b[:, 3].max(), b[:, 5].max()]))
+        finally:
+            self.objects()  # restore biker visibility from the checkbox
+        settings = self.radar_settings().__dict__
+        distances = np.arange(2.0, 50.0 + 1e-9, 2.0)
+        base_db = {n: np.zeros_like(distances) for n, _ in ASPECTS}
+        with_db = {n: np.zeros_like(distances) for n, _ in ASPECTS}
+        total = 2 * len(ASPECTS) * len(distances)
+        dlg = QtWidgets.QProgressDialog("Computing returned power vs. distance…", "Cancel", 0, total, self)
+        dlg.setWindowModality(QtCore.Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        k = 0
+        for name, az in ASPECTS:
+            for i, d in enumerate(distances):
+                r = RadarSettings(**{**settings, "azimuth_deg": az, "distance_m": float(d)})
+                for target, out in ((base_t, base_db), (with_t, with_db)):
+                    if dlg.wasCanceled():
+                        return
+                    out[name][i] = compute_rcs(target, r, aim).returned_db
+                    k += 1
+                    dlg.setValue(k)
+                    QtWidgets.QApplication.processEvents()
+        paths = save_comparison(folder, distances, base_db, with_db, [o.name for o in parts])
+        QtWidgets.QMessageBox.information(self, "Charts saved", "Saved:\n" + "\n".join(str(p) for p in paths))
 
 
 def main():

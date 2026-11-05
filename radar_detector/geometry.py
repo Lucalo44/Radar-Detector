@@ -21,6 +21,8 @@ from .materials import MaterialLibrary
 from .rcs import RadarSettings, Target
 
 LAMBDA = RadarSettings().wavelength
+HEAD_CENTER = np.array([0.75, 0.0, 1.61])  # baseline rider: shoulder (0.62, 0, 1.36) + neck offset
+HEAD_RADIUS = 0.105
 UNIT_SCALES = {"m": 1.0, "cm": 0.01, "mm": 0.001, "in": 0.0254, "ft": 0.3048}
 
 
@@ -208,7 +210,7 @@ def build_biker(lib: MaterialLibrary) -> list[SceneObject]:
     rider = [
         (capsule(hip, shoulder, 0.15), body),
         (tube(shoulder + [0.03, 0, 0.05], shoulder + [0.07, 0, 0.13], 0.055), skin),  # neck
-        (sphere(shoulder + [0.13, 0, 0.25], 0.105), skin),  # head
+        (sphere(HEAD_CENTER, HEAD_RADIUS), skin),  # head
     ]
     for side in (-1, 1):
         sh = shoulder + [0, 0.18 * side, 0.0]
@@ -260,9 +262,21 @@ def guess_units(raw_extent: float) -> str:
     return "mm"
 
 
-def make_attachment(name: str, mesh: pv.PolyData, mat_index: int, biker_present: bool) -> SceneObject:
+def make_attachment(name: str, mesh: pv.PolyData, mat_index: int, biker_present: bool,
+                    mount: str = "saddle") -> SceneObject:
+    """Wrap a centred mesh as a movable attachment.
+
+    mount="saddle" puts it behind the saddle; mount="head" sits it flush against the back of the
+    rider's head, facing a rear radar.
+    """
     obj = SceneObject(name, mesh, np.full(mesh.n_cells, mat_index, dtype=int))
-    obj.position = DEFAULT_ATTACH_POINT.copy() if biker_present else np.array([0.5, 0.0, 0.8])
+    if not biker_present:
+        obj.position = np.array([0.5, 0.0, 0.8])
+    elif mount == "head":
+        half_depth = mesh.bounds[1]  # mesh is centred, so its +X extent is half its depth
+        obj.position = HEAD_CENTER - np.array([HEAD_RADIUS + half_depth, 0.0, 0.0])
+    else:
+        obj.position = DEFAULT_ATTACH_POINT.copy()
     return obj
 
 
