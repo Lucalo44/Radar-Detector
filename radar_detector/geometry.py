@@ -102,7 +102,7 @@ def flat_plate(size: float = 0.1, normal=(-1, 0, 0)) -> pv.PolyData:
 # --------------------------------------------------------------------------- #
 # Scene objects
 # --------------------------------------------------------------------------- #
-@dataclass
+@dataclass(eq=False)  # compare by identity: fields include NumPy arrays
 class SceneObject:
     name: str
     base_mesh: pv.PolyData  # triangulated, local coordinates
