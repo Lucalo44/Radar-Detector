@@ -169,7 +169,17 @@ class MainWindow(QtWidgets.QMainWindow):
         panel = QtWidgets.QWidget()
         self.panel_layout = QtWidgets.QVBoxLayout(panel)
         scroll.setWidget(panel)
-        split.addWidget(scroll)
+        # Left column: the geometry list stays pinned at the top; everything else scrolls beneath it
+        left = QtWidgets.QWidget()
+        left.setMinimumWidth(500)
+        left_lay = QtWidgets.QVBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(0)
+        self.pinned_layout = QtWidgets.QVBoxLayout()
+        self.pinned_layout.setContentsMargins(9, 9, 9, 4)
+        left_lay.addLayout(self.pinned_layout)
+        left_lay.addWidget(scroll, 1)
+        split.addWidget(left)
 
         view = QtWidgets.QWidget()
         vlay = QtWidgets.QVBoxLayout(view)
@@ -219,9 +229,9 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ #
     # Panel construction
     # ------------------------------------------------------------------ #
-    def _group(self, title: str) -> QtWidgets.QGroupBox:
+    def _group(self, title: str, pinned: bool = False) -> QtWidgets.QGroupBox:
         g = QtWidgets.QGroupBox(title)
-        self.panel_layout.addWidget(g)
+        (self.pinned_layout if pinned else self.panel_layout).addWidget(g)
         return g
 
     def _build_mode_box(self):
@@ -242,10 +252,10 @@ class MainWindow(QtWidgets.QMainWindow):
         lay.addWidget(self.cb_biker)
 
     def _build_geometry_box(self):
-        g = self._group("Geometry")
+        g = self._group("Geometry", pinned=True)
         lay = QtWidgets.QVBoxLayout(g)
         self.obj_list = QtWidgets.QListWidget()
-        self.obj_list.setMaximumHeight(130)
+        self.obj_list.setMaximumHeight(120)
         self.obj_list.currentRowChanged.connect(self._on_object_selected)
         self.obj_list.itemChanged.connect(self._on_item_checked)
         lay.addWidget(self.obj_list)
@@ -271,6 +281,9 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.b_remove)
         lay.addLayout(row)
 
+        # Placement and material for the selected object scroll with the rest of the panel
+        g = self._group("Selected object")
+        lay = QtWidgets.QVBoxLayout(g)
         form = QtWidgets.QFormLayout()
         mrow = QtWidgets.QHBoxLayout()
         self.obj_mat_combo = QtWidgets.QComboBox()
@@ -373,10 +386,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sel_label = QtWidgets.QLabel("0 faces selected")
         lay.addWidget(self.sel_label)
 
+        src = QtWidgets.QHBoxLayout()
+        self.rb_preset = QtWidgets.QRadioButton("Preset")
+        self.rb_custom = QtWidgets.QRadioButton("Custom")
+        self.rb_preset.setChecked(True)
+        src.addWidget(QtWidgets.QLabel("Material:"))
+        src.addWidget(self.rb_preset)
+        src.addWidget(self.rb_custom)
+        src.addStretch()
+        lay.addLayout(src)
+        self.rb_custom.toggled.connect(self._on_material_source)
+
         form = QtWidgets.QFormLayout()
         self.face_mat_combo = QtWidgets.QComboBox()
         self.face_mat_combo.currentIndexChanged.connect(self._load_material_values)
-        form.addRow("Material:", self.face_mat_combo)
+        self.preset_label = QtWidgets.QLabel("Preset:")
+        form.addRow(self.preset_label, self.face_mat_combo)
+        self.custom_name = QtWidgets.QLineEdit()
+        self.custom_name.setPlaceholderText("Custom material")
+        self.custom_color_btn = QtWidgets.QPushButton()
+        self.custom_color_btn.setFixedWidth(60)
+        self.custom_color_btn.clicked.connect(self._pick_custom_color)
+        self._custom_color = "#b04fc4"
+        nrow = QtWidgets.QHBoxLayout()
+        nrow.addWidget(self.custom_name, 1)
+        nrow.addWidget(QtWidgets.QLabel("Colour:"))
+        nrow.addWidget(self.custom_color_btn)
+        self.custom_name_label = QtWidgets.QLabel("Name:")
+        self.custom_row = QtWidgets.QWidget()
+        self.custom_row.setLayout(nrow)
+        nrow.setContentsMargins(0, 0, 0, 0)
+        form.addRow(self.custom_name_label, self.custom_row)
         self.R_spin = _dspin(0, 1, 0.5, 0.01, 3)
         self.A_spin = _dspin(0, 1, 0.5, 0.01, 3)
         self.s_spin = _dspin(0, 1, 0.0, 0.05, 2)
@@ -385,21 +425,24 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Absorptance A:", self.A_spin)
         form.addRow("Transmittance T = 1−R−A:", self.T_label)
         form.addRow("Roughness (diffuse share):", self.s_spin)
-        for s in (self.R_spin, self.A_spin):
-            s.valueChanged.connect(self._update_T)
+        for sp in (self.R_spin, self.A_spin):
+            sp.valueChanged.connect(self._update_T)
         lay.addLayout(form)
+        self.mat_hint = QtWidgets.QLabel("")
+        self.mat_hint.setWordWrap(True)
+        self.mat_hint.setStyleSheet(MUTED)
+        lay.addWidget(self.mat_hint)
         row = QtWidgets.QHBoxLayout()
         b_assign = QtWidgets.QPushButton("Assign to selected faces")
         b_assign.setStyleSheet("font-weight:600")
         b_assign.clicked.connect(self.assign_material)
         row.addWidget(b_assign)
-        b_new = QtWidgets.QPushButton("Save as new material…")
-        b_new.clicked.connect(self.new_material)
-        row.addWidget(b_new)
-        b_upd = QtWidgets.QPushButton("Update material")
-        b_upd.clicked.connect(self.update_material)
-        row.addWidget(b_upd)
+        b_obj = QtWidgets.QPushButton("Assign to whole object")
+        b_obj.setToolTip("Applies this material to every face of the object selected in the geometry list.")
+        b_obj.clicked.connect(self.assign_material_to_object)
+        row.addWidget(b_obj)
         lay.addLayout(row)
+        self._on_material_source()
 
     def _build_results_box(self):
         g = self._group("Results")
@@ -543,7 +586,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 combo.addItem(_swatch(m.color), m.name)
             combo.setCurrentIndex(max(cur, 0))
             combo.blockSignals(False)
-        self._load_material_values()
+        if not self.rb_custom.isChecked():  # never overwrite values the user is typing in Custom mode
+            self._load_material_values()
 
     def refresh_object_list(self, select: geo.SceneObject | None = None):
         if self.obj_mat_combo.count() != len(self.lib):
@@ -842,15 +886,39 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ #
     # Materials (advanced)
     # ------------------------------------------------------------------ #
+    def _on_material_source(self, *_):
+        custom = self.rb_custom.isChecked()
+        for w in (self.R_spin, self.A_spin, self.s_spin):
+            w.setEnabled(custom)  # preset values are shown read-only, so a preset can't be edited by accident
+        for w in (self.custom_name_label, self.custom_row):
+            w.setVisible(custom)
+        self.preset_label.setText("Start from:" if custom else "Preset:")
+        self.mat_hint.setText(
+            "Set your own values. Assigning saves this as a new material in the library (it never changes a preset) "
+            "and it then appears in every material list." if custom else
+            "Presets are applied exactly as listed. Switch to Custom to set your own values.")
+        self._set_custom_color(self._custom_color)
+        if not custom:
+            self._load_material_values()
+
+    def _set_custom_color(self, hex_color: str):
+        self._custom_color = hex_color
+        self.custom_color_btn.setStyleSheet(f"background:{hex_color}; border:1px solid #888; border-radius:3px; min-height:18px")
+
+    def _pick_custom_color(self):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(self._custom_color), self, "Material colour")
+        if c.isValid():
+            self._set_custom_color(c.name())
+
     def _load_material_values(self, *_):
         i = self.face_mat_combo.currentIndex()
         if i < 0:
             return
         m = self.lib[i]
-        for s, v in ((self.R_spin, m.reflectance), (self.A_spin, m.absorptance), (self.s_spin, m.roughness)):
-            s.blockSignals(True)
-            s.setValue(v)
-            s.blockSignals(False)
+        for sp, v in ((self.R_spin, m.reflectance), (self.A_spin, m.absorptance), (self.s_spin, m.roughness)):
+            sp.blockSignals(True)
+            sp.setValue(v)
+            sp.blockSignals(False)
         self._update_T()
 
     def _update_T(self, *_):
@@ -862,11 +930,32 @@ class MainWindow(QtWidgets.QMainWindow):
             A = 1 - R
         self.T_label.setText(f"{max(0.0, 1 - R - A):.3f}")
 
+    def _material_to_assign(self) -> int:
+        """Library index for the panel's current material, adding a custom material if needed."""
+        if not self.rb_custom.isChecked():
+            return self.face_mat_combo.currentIndex()
+        R, A, s = self.R_spin.value(), self.A_spin.value(), self.s_spin.value()
+        name = self.custom_name.text().strip() or "Custom material"
+        # Re-assigning the same custom material reuses its entry instead of piling up copies
+        for i, m in enumerate(self.lib.materials):
+            if (m.name == name and m.color == self._custom_color and abs(m.reflectance - R) < 1e-9
+                    and abs(m.absorptance - A) < 1e-9 and abs(m.roughness - s) < 1e-9):
+                return i
+        idx = self.lib.add(name, R, A, s, self._custom_color)
+        self.lib[idx].note = "Custom"
+        self.refresh_material_combos()
+        self.face_mat_combo.blockSignals(True)
+        self.face_mat_combo.setCurrentIndex(idx)
+        self.face_mat_combo.blockSignals(False)
+        self.custom_name.setText(self.lib[idx].name)  # shows the de-duplicated name, e.g. "Foil (2)"
+        return idx
+
     def assign_material(self):
         if not self._sel_count():
-            QtWidgets.QMessageBox.information(self, "No faces selected", "Tick 'Pick faces' and click faces first.")
+            QtWidgets.QMessageBox.information(self, "No faces selected",
+                "Click a surface in the 3D view to select it first, or use Assign to whole object.")
             return
-        idx = self.face_mat_combo.currentIndex()
+        idx = self._material_to_assign()
         for oid, faces in self.selection.items():
             obj = self._obj_by_id(oid)
             if obj is not None and faces:
@@ -875,19 +964,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._on_object_selected()
         self._schedule()
 
-    def new_material(self):
-        name, ok = QtWidgets.QInputDialog.getText(self, "New material", "Name:", text="Custom material")
-        if not ok:
+    def assign_material_to_object(self):
+        o = self.current_object()
+        if o is None:
+            QtWidgets.QMessageBox.information(self, "No object", "Select an object in the geometry list first.")
             return
-        idx = self.lib.add(name, self.R_spin.value(), self.A_spin.value(), self.s_spin.value())
-        self.refresh_material_combos()
-        self.face_mat_combo.setCurrentIndex(idx)
-
-    def update_material(self):
-        i = self.face_mat_combo.currentIndex()
-        m = self.lib[i]
-        m.reflectance, m.absorptance, m.roughness = self.R_spin.value(), self.A_spin.value(), self.s_spin.value()
-        m.__post_init__()
+        o.set_material(self._material_to_assign())
+        self.selection.pop(id(o), None)
+        self._update_sel_label()
         self._on_object_selected()
         self._schedule()
 

@@ -57,3 +57,21 @@ python run.py
 ```
 
 Of note, an open window keeps running the old code, so a full restart is required. I also lost some time to a second clone sitting in my home folder. I kept pulling into one copy and launching the other, which was not a major success. If an update doesn't seem to take, check which folder you're actually running from.
+
+## How it calculates
+
+The solver in [radar_detector/rcs.py](radar_detector/rcs.py) works on the triangle mesh of the whole scene, where every face carries a material with a reflectance R, an absorptance A and a roughness s. At 77GHz the wavelength is 3.89mm, so most faces are many wavelengths across and can't be treated as points.
+
+The radar cross section σ is the sum of three mechanisms:
+
+1. **Specular single bounce (physical optics).** Each lit, unshadowed face contributes the exact closed-form integral of the round-trip phase across its triangle, weighted by its reflection amplitude √(R(1−s)) and the beam strength at that face. These add coherently, so faces can reinforce or cancel each other. This gives σ_spec = (4π/λ²)·|Σ field|².
+2. **Diffuse single bounce.** The rough share s of each face's reflected power scatters like a Lambertian surface (σ = 4·ρ·area·cos²θ, with ρ = R·s). These terms add as power, not phase.
+3. **Multi-bounce (shooting and bouncing rays).** A grid of ray tubes (5mm spacing by default) is fired from the radar and traced through up to 3 reflections. Tubes that come back after two or more bounces are added coherently to the physical optics field. This is the only part that catches corner reflectors and dihedrals.
+
+Specifically, each face sees its own direction and range from the radar rather than one plane wave, and the beam falls off as a Gaussian with the chosen −3dB cone. Ray casting handles shadowing, and thin plastics dim what's behind them by their transmittance instead of blocking it.
+
+Returned power comes from the monostatic radar equation, with an ideal Gaussian-beam antenna gain of G = 16·ln2/θ² for a cone of θ radians (about 19.6dBi at 20°):
+
+P_returned / P_transmitted = G²·λ²·σ / ((4π)³·R⁴)
+
+That 1/R⁴ term is why returned power drops by roughly 50dB between 2m and 50m, even when σ barely changes. The tool also reports what share of the transmitted power lands on the target and how much of that is reflected, absorbed or passed through. It ignores losses, ground-plane multipath, polarization, edge diffraction and the change in reflectance with angle.

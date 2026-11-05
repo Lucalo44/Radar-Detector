@@ -17,6 +17,7 @@ derived from typical complex permittivities (e.g. skin eps ~ 6.5 - j8 gives
 from __future__ import annotations
 
 import colorsys
+import re
 from dataclasses import dataclass, field
 
 
@@ -91,7 +92,8 @@ class MaterialLibrary:
         raise KeyError(name)
 
     def add(self, name: str, reflectance: float, absorptance: float, roughness: float, color: str | None = None) -> int:
-        base, n = name.strip() or "Custom", 1
+        name = name.strip()
+        base, n = re.sub(r" \(\d+\)$", "", name) or "Custom", 1  # "Foil (2)" -> "Foil (3)", not "Foil (2) (2)"
         existing = set(self.names())
         while name in existing or not name.strip():
             n += 1
