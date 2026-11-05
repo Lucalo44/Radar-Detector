@@ -41,25 +41,51 @@ def save_comparison(folder: str | Path, distances: np.ndarray, base_db: dict[str
     names = [n for n, _ in ASPECTS]
     i_ref = int(np.argmin(np.abs(distances - ref_distance)))
 
-    # ---- 1. returned power vs distance, one panel per aspect ----
-    fig = Figure(figsize=(10, 7.2), facecolor=SURFACE)
-    axes = fig.subplots(2, 2, sharex=True, sharey=True)
-    for ax, name in zip(axes.flat, names):
-        _style(ax)
-        ax.plot(distances, base_db[name], color=BASE_COLOR, lw=2, ls=(0, (5, 3)), label="Biker alone")
+    # ---- 1. returned power vs distance, one panel per aspect, each with a difference strip ----
+    # Returned power spans ~50 dB over 2-50 m (1/R^4), so an attachment's effect is invisible on that
+    # axis alone. The strip under each panel plots the difference on its own scale.
+    deltas = {n: with_db[n] - base_db[n] for n in names}
+    # At least +/-1 dB so solver speckle on a part that adds nothing doesn't read as a big swing
+    d_lim = max(1.0, 1.15 * max(float(np.abs(d).max()) for d in deltas.values()))
+    fig = Figure(figsize=(10, 9), facecolor=SURFACE)
+    gs = fig.add_gridspec(5, 2, height_ratios=[3, 1.3, 0.5, 3, 1.3], hspace=0.1, wspace=0.05,
+                          left=0.1, right=0.98, top=0.9, bottom=0.07)  # row 2 is a spacer
+    p_lo = min(float(min(base_db[n].min(), with_db[n].min())) for n in names)
+    p_hi = max(float(max(base_db[n].max(), with_db[n].max())) for n in names)
+    pad = 0.05 * (p_hi - p_lo)
+    first = None
+    for k, name in enumerate(names):
+        r, c = 3 * (k // 2), k % 2
+        ax = fig.add_subplot(gs[r, c], sharex=first)
+        first = first or ax
+        dx = fig.add_subplot(gs[r + 1, c], sharex=first)
+        for a in (ax, dx):
+            _style(a)
         ax.plot(distances, with_db[name], color=WITH_COLOR, lw=2, label=f"Biker + {parts}")
-        delta = with_db[name][i_ref] - base_db[name][i_ref]
+        # Baseline on top, so it stays visible where the two lines coincide
+        ax.plot(distances, base_db[name], color=BASE_COLOR, lw=1.5, ls=(0, (4, 3)), label="Biker alone", zorder=3)
+        ax.set_ylim(p_lo - pad, p_hi + pad)
         ax.set_title(name, color=INK, fontsize=10, loc="left")
-        ax.text(0.98, 0.95, f"{delta:+.1f} dB at {distances[i_ref]:.0f} m", transform=ax.transAxes,
+        ax.text(0.98, 0.95, f"{deltas[name][i_ref]:+.1f} dB at {distances[i_ref]:.0f} m", transform=ax.transAxes,
                 ha="right", va="top", color=INK, fontsize=9)
-    for ax in axes[1]:
-        ax.set_xlabel("Distance (m)", color=INK2, fontsize=9)
-    for ax in axes[:, 0]:
-        ax.set_ylabel("Returned power (dB re transmitted)", color=INK2, fontsize=9)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
+        ax.tick_params(labelbottom=False)
+        dx.axhline(0, color=INK2, lw=1)
+        dx.fill_between(distances, 0, deltas[name], color=WITH_COLOR, alpha=0.18, lw=0)
+        dx.plot(distances, deltas[name], color=WITH_COLOR, lw=1.5)
+        dx.set_ylim(-d_lim, d_lim)
+        if c == 0:
+            ax.set_ylabel("Returned power\n(dB re transmitted)", color=INK2, fontsize=9)
+            dx.set_ylabel("Change (dB)", color=INK2, fontsize=9)
+        else:
+            ax.tick_params(labelleft=False)
+            dx.tick_params(labelleft=False)
+        if r == 3:
+            dx.set_xlabel("Distance (m)", color=INK2, fontsize=9)
+        else:
+            dx.tick_params(labelbottom=False)
+    handles, labels = first.get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper right", frameon=False, fontsize=9, labelcolor=INK, ncol=2)
     fig.suptitle("Returned radar power vs. distance", x=0.06, ha="left", color=INK, fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
     p_power = folder / "returned_power_vs_distance.png"
     fig.savefig(p_power, dpi=200)
 
@@ -74,8 +100,8 @@ def save_comparison(folder: str | Path, distances: np.ndarray, base_db: dict[str
         ax.plot(distances, d, color=color, lw=2, label=name)
         ends[name] = d[-1]
     # Direct labels at the line ends, nudged apart so lines that finish together don't overprint
-    lo, hi = ax.get_ylim()
-    gap = 0.06 * (hi - lo)
+    ax.set_ylim(-d_lim, d_lim)
+    gap = 0.06 * 2 * d_lim
     placed = []
     for name, y in sorted(ends.items(), key=lambda kv: kv[1]):
         y_lab = max(y, placed[-1] + gap) if placed else y
