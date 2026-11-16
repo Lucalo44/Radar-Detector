@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="210" viewBox="0 0 600 210" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <rect width="600" height="210" fill="#ffffff"/>
+  <text x="20" y="22" fill="#0b0b0b" font-weight="bold">Step 4: shooting and bouncing rays</text>
+  <rect x="20" y="95" width="34" height="26" fill="#c0392b"/>
+  <g stroke="#2a78d6" stroke-width="1" stroke-opacity="0.5">
+    <line x1="54" y1="102" x2="370" y2="70"/><line x1="54" y1="106" x2="370" y2="95"/>
+    <line x1="54" y1="110" x2="370" y2="120"/><line x1="54" y1="114" x2="370" y2="145"/>
+  </g>
+  <text x="120" y="60" fill="#52514e">ray tubes on a 5 mm grid</text>
+  <polyline points="440,40 440,180 300,180" fill="none" stroke="#8c8b85" stroke-width="5"/>
+  <polyline points="54,108 400,108 440,150 300,150" fill="none" stroke="#eb6834" stroke-width="2"/>
+  <line x1="300" y1="150" x2="54" y2="116" stroke="#eb6834" stroke-width="2" stroke-dasharray="5 3"/>
+  <text x="455" y="110" fill="#0b0b0b">2+ reflections:</text>
+  <text x="455" y="128" fill="#0b0b0b">corners, dihedrals</text>
+  <text x="300" y="200" fill="#52514e">exit tube re-radiates with a sinc aperture factor</text>
+</svg>

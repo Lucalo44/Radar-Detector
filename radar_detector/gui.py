@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import sys
 from pathlib import Path
 
@@ -13,132 +12,32 @@ from pyvistaqt import QtInteractor
 from PySide6 import QtCore, QtGui, QtWidgets
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
-from vtkmodules.vtkRenderingCore import vtkCellPicker
 
+from . import compare as cmp
 from . import geometry as geo
+from .compare_tab import CompareTab
+from .docs_tab import DocsTab
+from .jobs import SolveReply, SolveRequest, SolveService
 from .materials import MaterialLibrary
-from .rcs import RadarSettings, RcsResult, compute_rcs
+from .rcs import RadarSettings, RcsResult, ray_engine
+from .project_ui import ProjectMixin
+from .results_tab import VIS_COLORS, ResultsTab, help_button
+from .scene_view import SceneMixin
+from .widgets import DIST_MAX, DIST_MIN, DIST_STEPS, HeatLegend, TickLabels, _dist_to_slider, _dspin, _slider_to_dist, _swatch
 
 MUTED = "color: palette(placeholder-text)"
-HIGHLIGHT = np.array([255, 214, 0], dtype=np.uint8)
-SIMPLE_RADAR = dict(azimuth_deg=0.0, elevation_deg=0.0, beam_width_deg=20.0, multibounce=True, max_bounces=3, ray_spacing_m=0.005)
+SIMPLE_RADAR = dict(azimuth_deg=0.0, elevation_deg=0.0, beam_width_deg=20.0, multibounce=True, max_bounces=3,
+                    ray_spacing_m=0.005, bandwidth_hz=1e9, n_freq=9, aspect_avg_deg=0.0)
 MESH_FILTER = "3D geometry (*.stl *.obj *.ply *.vtk *.vtp *.glb *.gltf *.off);;All files (*)"
+DECIMATE_OFFER = 50_000  # offer decimation on import above this many faces
 
 
-def _fmt_pct(frac: float) -> str:
-    pct = 100.0 * frac
-    if pct == 0:
-        return "0 %"
-    if pct >= 0.01:
-        return f"{pct:.3f} %"
-    return f"{pct:.3e} %"
-
-
-def _swatch(hex_color: str) -> QtGui.QIcon:
-    pm = QtGui.QPixmap(14, 14)
-    pm.fill(QtGui.QColor(hex_color))
-    return QtGui.QIcon(pm)
-
-
-def _dspin(lo, hi, val, step, dec=3, suffix="") -> QtWidgets.QDoubleSpinBox:
-    s = QtWidgets.QDoubleSpinBox()
-    s.setRange(lo, hi)
-    s.setDecimals(dec)
-    s.setSingleStep(step)
-    s.setValue(val)
-    if suffix:
-        s.setSuffix(suffix)
-    s.setKeyboardTracking(False)
-    return s
-
-
-# =========================================================================== #
-# Aspect sweep dialog
-# =========================================================================== #
-class SweepDialog(QtWidgets.QDialog):
-    INK, INK2, SURFACE, SERIES, MARK = "#0b0b0b", "#52514e", "#fcfcfb", "#2a78d6", "#eb6834"
-
-    def __init__(self, parent, az: np.ndarray, dbsm: np.ndarray, current_az: float, distance: float):
-        super().__init__(parent)
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-        from matplotlib.figure import Figure
-
-        self.az, self.dbsm = az, dbsm
-        self.setWindowTitle("Aspect sweep")
-        self.resize(900, 560)
-        lay = QtWidgets.QHBoxLayout(self)
-
-        fig = Figure(figsize=(5.5, 5.5), facecolor=self.SURFACE)
-        self.canvas = FigureCanvasQTAgg(fig)
-        ax = fig.add_subplot(projection="polar", facecolor=self.SURFACE)
-        ax.set_theta_zero_location("S")  # 0 deg (radar behind rider) at the bottom, rider faces up
-        ax.set_theta_direction(-1)  # 90 deg = rider's left
-        th = np.radians(np.append(az, az[0] + 360))
-        r = np.append(dbsm, dbsm[0])
-        ax.plot(th, r, color=self.SERIES, lw=2)
-        cur = float(np.interp(current_az % 360, np.append(az, 360), np.append(dbsm, dbsm[0])))
-        ax.plot([np.radians(current_az)], [cur], "o", ms=9, color=self.MARK, mec=self.SURFACE, mew=2)
-        ax.annotate(f"current {current_az:.0f}°: {cur:.1f} dBsm", (np.radians(current_az), cur),
-                    xytext=(12, 8), textcoords="offset points", color=self.INK, fontsize=9)
-        lo = np.floor(dbsm.min() / 5) * 5
-        hi = np.ceil(dbsm.max() / 5) * 5 + 2
-        ax.set_ylim(lo, hi)
-        ax.grid(color="#d8d7d2", lw=0.6)
-        ax.spines["polar"].set_color("#d8d7d2")
-        ax.tick_params(colors=self.INK2, labelsize=8)
-        ax.set_xticks(np.radians([0, 45, 90, 135, 180, 225, 270, 315]))
-        ax.set_xticklabels(["0° rear", "45°", "90° left", "135°", "180° front", "225°", "270° right", "315°"])
-        ax.set_rlabel_position(22.5)
-        ax.set_title(f"Total RCS (dBsm) vs. angle of incidence, {distance:.1f} m", color=self.INK, fontsize=11, pad=18)
-        self._hover = ax.annotate("", (0, 0), xytext=(10, -14), textcoords="offset points", fontsize=9, color=self.INK,
-                                  bbox=dict(boxstyle="round", fc="white", ec="#d8d7d2"))
-        self._hover.set_visible(False)
-        self._ax = ax
-        self.canvas.mpl_connect("motion_notify_event", self._on_move)
-        fig.tight_layout()
-        lay.addWidget(self.canvas, 3)
-
-        side = QtWidgets.QVBoxLayout()
-        table = QtWidgets.QTableWidget(len(az), 2)
-        table.setHorizontalHeaderLabels(["Angle (°)", "RCS (dBsm)"])
-        for i, (a, d) in enumerate(zip(az, dbsm)):
-            table.setItem(i, 0, QtWidgets.QTableWidgetItem(f"{a:.0f}"))
-            table.setItem(i, 1, QtWidgets.QTableWidgetItem(f"{d:.2f}"))
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        side.addWidget(table)
-        btn = QtWidgets.QPushButton("Save CSV…")
-        btn.clicked.connect(self._save)
-        side.addWidget(btn)
-        lay.addLayout(side, 1)
-
-    def _on_move(self, ev):
-        if ev.inaxes is not self._ax or ev.xdata is None:
-            if self._hover.get_visible():
-                self._hover.set_visible(False)
-                self.canvas.draw_idle()
-            return
-        deg = np.degrees(ev.xdata) % 360
-        i = int(np.argmin(np.abs(((self.az - deg) + 180) % 360 - 180)))
-        self._hover.xy = (np.radians(self.az[i]), self.dbsm[i])
-        self._hover.set_text(f"{self.az[i]:.0f}°  {self.dbsm[i]:.2f} dBsm")
-        self._hover.set_visible(True)
-        self.canvas.draw_idle()
-
-    def _save(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save sweep", "aspect_sweep.csv", "CSV (*.csv)")
-        if path:
-            with open(path, "w", newline="") as f:
-                w = csv.writer(f)
-                w.writerow(["azimuth_deg", "rcs_dbsm", "rcs_m2"])
-                for a, d in zip(self.az, self.dbsm):
-                    w.writerow([f"{a:.1f}", f"{d:.3f}", f"{10 ** (d / 10):.6g}"])
 
 
 # =========================================================================== #
 # Main window
 # =========================================================================== #
-class MainWindow(QtWidgets.QMainWindow):
+class MainWindow(SceneMixin, ProjectMixin, QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Radar Detector — 77 GHz bicycle RCS")
@@ -151,17 +50,37 @@ class MainWindow(QtWidgets.QMainWindow):
         self.result: RcsResult | None = None
         self.spans: list = []
         self.actor_map: dict[str, geo.SceneObject] = {}
-        self.mesh_map: dict[int, pv.PolyData] = {}  # id(obj) -> rendered mesh, for in-place recolouring
         self._adj_cache: dict[int, tuple] = {}
         self._press_pos = None
         self._first_render = True
+        self.base_result: RcsResult | None = None
+        self.baseline = cmp.BaselineCache()
+        self._gen = 0  # solve generation; replies from older generations are dropped
+        self._scene_actors: dict[int, tuple] = {}  # id(obj) -> (actor, rendered mesh, source world mesh)
+        self._radar_actors: list = []
+        self._radar_key = None
+        self._flash_obj: geo.SceneObject | None = None
+        self._flash_timer = QtCore.QTimer(self, singleShot=True, interval=1500)
+        self._flash_timer.timeout.connect(self._end_flash)
 
         self._debounce = QtCore.QTimer(self, singleShot=True, interval=250)
         self._debounce.timeout.connect(self.compute)
+        self.solver = SolveService(self)
+        self.solver.finished.connect(self._on_solved)
 
         # ---- layout ----
+        central = QtWidgets.QWidget()
+        clay = QtWidgets.QVBoxLayout(central)
+        clay.setContentsMargins(0, 0, 0, 0)
+        clay.setSpacing(0)
+        self.setCentralWidget(central)
+        self.engine_banner = QtWidgets.QLabel("")
+        self.engine_banner.setWordWrap(True)
+        self.engine_banner.setStyleSheet("background:#fff1d6; color:#5c3d00; padding:8px 12px; border-bottom:1px solid #e8c98a")
+        self.engine_banner.setVisible(False)
+        clay.addWidget(self.engine_banner)
         split = QtWidgets.QSplitter()
-        self.setCentralWidget(split)
+        clay.addWidget(split, 1)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setMinimumWidth(500)
@@ -181,9 +100,11 @@ class MainWindow(QtWidgets.QMainWindow):
         left_lay.addWidget(scroll, 1)
         split.addWidget(left)
 
+        # Right side: tabs. Scene (3D view), Results, Compare, Docs
+        self.tabs = QtWidgets.QTabWidget()
         view = QtWidgets.QWidget()
         vlay = QtWidgets.QVBoxLayout(view)
-        vlay.setContentsMargins(0, 0, 0, 0)
+        vlay.setContentsMargins(0, 4, 0, 0)
         bar = QtWidgets.QHBoxLayout()
         for text, fn in (("Fit bike", lambda: self.fit_view(False)), ("Fit whole scene", lambda: self.fit_view(True)),
                          ("Side view", lambda: self.set_view("side")), ("Rear view", lambda: self.set_view("rear")),
@@ -196,21 +117,40 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_hint.setStyleSheet(MUTED)
         bar.addWidget(self.view_hint)
         vlay.addLayout(bar)
+        hbar = QtWidgets.QHBoxLayout()
+        self.heat_check = QtWidgets.QCheckBox("Show where the return comes from (per-face heat map)")
+        self.heat_check.toggled.connect(lambda _: self.refresh_scene())
+        hbar.addWidget(self.heat_check)
+        self.heat_legend = HeatLegend()
+        hbar.addWidget(self.heat_legend)
+        hbar.addStretch()
+        vlay.addLayout(hbar)
         self.plotter = QtInteractor(view)
         self.plotter.set_background("#f4f4f2", top="#ffffff")
+        self.plotter.add_axes()
         vlay.addWidget(self.plotter.interactor, 1)
-        split.addWidget(view)
+        self.tabs.addTab(view, "Scene")
+        self.results_tab = ResultsTab()
+        self.results_tab.help_requested.connect(self.show_docs)
+        self.results_tab.object_clicked.connect(self._show_object_by_name)
+        self.results_tab.unit_changed.connect(lambda _: self._update_summary())
+        self.tabs.addTab(self.results_tab, "Results")
+        self.compare_tab = CompareTab(self._chart_inputs, self._sweep_inputs)
+        self.tabs.addTab(self.compare_tab, "Compare")
+        self.docs_tab = DocsTab()
+        self.tabs.addTab(self.docs_tab, "Docs")
+        split.addWidget(self.tabs)
         split.setStretchFactor(1, 1)
 
         self._build_mode_box()
         self._build_geometry_box()
         self._build_radar_box()
         self._build_faces_box()
-        self._build_results_box()
         self.panel_layout.addStretch()
         self.project_path: Path | None = None
         self._default_settings = self._gather_settings()
         self._build_menu()
+        self._check_engine()
 
         # Mouse observers go on the interactor *style*: pyvista's style grabs focus on button-down, after which
         # the interactor delivers the release only to the style, so an interactor observer never sees it.
@@ -274,11 +214,36 @@ class MainWindow(QtWidgets.QMainWindow):
         menu.addAction("Corner reflector (10 cm, aluminum)", lambda: self.add_sample("corner"))
         menu.addAction("Flat plate (10 cm, aluminum)", lambda: self.add_sample("plate"))
         menu.addAction("Sphere (10 cm dia., aluminum)", lambda: self.add_sample("sphere"))
+        menu.addAction("Metalens retro tag (53 mm, measured)", lambda: self.add_sample("metalens"))
+        menu.addAction("Ideal retroreflector (53 mm)", lambda: self.add_sample("retro"))
         b_sample.setMenu(menu)
         row.addWidget(b_sample)
         self.b_remove = QtWidgets.QPushButton("Delete")
         self.b_remove.clicked.connect(self.remove_object)
         row.addWidget(self.b_remove)
+        lay.addLayout(row)
+
+        # One-line result, pinned under the list so it stays visible while editing
+        g = self._group("Result", pinned=True)
+        lay = QtWidgets.QVBoxLayout(g)
+        self.summary = QtWidgets.QLabel("—")
+        self.summary.setStyleSheet("font-size:15px; font-weight:600")
+        self.summary.setWordWrap(True)
+        self.summary.setCursor(QtCore.Qt.PointingHandCursor)
+        self.summary.setToolTip("Click for the full results")
+        self.summary.mousePressEvent = lambda _e: self.tabs.setCurrentWidget(self.results_tab)
+        lay.addWidget(self.summary)
+        row = QtWidgets.QHBoxLayout()
+        self.summary_sub = QtWidgets.QLabel("")
+        self.summary_sub.setStyleSheet(MUTED)
+        self.summary_sub.setWordWrap(True)
+        row.addWidget(self.summary_sub, 1)
+        self.b_compute = QtWidgets.QPushButton("Compute")
+        self.b_compute.clicked.connect(self.compute)
+        row.addWidget(self.b_compute)
+        self.auto_check = QtWidgets.QCheckBox("Auto-update")
+        self.auto_check.setChecked(True)
+        row.addWidget(self.auto_check)
         lay.addLayout(row)
 
         # Placement and material for the selected object scroll with the rest of the panel
@@ -297,6 +262,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.obj_mat_info.setStyleSheet(MUTED)
         self.obj_mat_info.setWordWrap(True)
         form.addRow("", self.obj_mat_info)
+        self.obj_mat_estimate = QtWidgets.QLabel("Preset values are engineering <b>estimates</b> at 77 GHz, not lab data.")
+        self.obj_mat_estimate.setStyleSheet(MUTED)
+        self.obj_mat_estimate.setWordWrap(True)
+        form.addRow("", self.obj_mat_estimate)
 
         self.pos = [_dspin(-10, 10, 0, 0.01, 3, " m") for _ in range(3)]
         self.rot = [_dspin(-360, 360, 0, 5, 1, "°") for _ in range(3)]
@@ -317,47 +286,101 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_radar_box(self):
         g = self._group("Radar (77 GHz, λ = 3.89 mm)")
-        form = QtWidgets.QFormLayout(g)
-        drow = QtWidgets.QHBoxLayout()
+        outer = QtWidgets.QVBoxLayout(g)
+        form = QtWidgets.QFormLayout()
+        outer.addLayout(form)
+        drow = QtWidgets.QGridLayout()
+        drow.setVerticalSpacing(0)
         self.dist_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.dist_slider.setRange(10, 2000)  # 0.1 m steps -> 1..200 m
-        self.dist_slider.setValue(100)
-        self.dist_spin = _dspin(1, 200, 10, 0.5, 1, " m")
-        self.dist_slider.valueChanged.connect(lambda v: self.dist_spin.setValue(v / 10))
+        self.dist_slider.setRange(0, DIST_STEPS)  # log scale, 1..200 m
+        self.dist_slider.setValue(_dist_to_slider(10.0))
+        self.dist_spin = _dspin(DIST_MIN, DIST_MAX, 10, 0.5, 1, " m")
+        self.dist_slider.valueChanged.connect(lambda v: self.dist_spin.setValue(_slider_to_dist(v)))
         self.dist_spin.valueChanged.connect(self._on_distance)
-        drow.addWidget(self.dist_slider, 1)
-        drow.addWidget(self.dist_spin)
+        drow.addWidget(self.dist_slider, 0, 0)
+        drow.addWidget(self.dist_spin, 0, 1)
+        drow.addWidget(TickLabels(self.dist_slider), 1, 0)
+        drow.setColumnStretch(0, 1)
         form.addRow("Distance:", drow)
 
-        self.simple_radar_note = QtWidgets.QLabel("Fixed in Simple mode: radar directly behind the rider, 20° cone, multi-bounce on.")
+        self.simple_radar_note = QtWidgets.QLabel("Fixed in Simple mode: radar directly behind the rider, 20° cone, "
+                                                  "multi-bounce on, averaged over 76.5–77.5 GHz.")
         self.simple_radar_note.setWordWrap(True)
         self.simple_radar_note.setStyleSheet(MUTED)
-        form.addRow(self.simple_radar_note)
+        outer.addWidget(self.simple_radar_note)
 
-        self.beam_spin = _dspin(1, 120, 20, 1, 1, "°")
+        # Everything below is Advanced only, in one container so Simple mode keeps no hidden-row spacing
+        self.adv_radar = QtWidgets.QWidget()
+        adv = QtWidgets.QVBoxLayout(self.adv_radar)
+        adv.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self.adv_radar)
+        f2 = QtWidgets.QFormLayout()
+        adv.addLayout(f2)
         self.az_spin = _dspin(-180, 360, 0, 5, 1, "°")
         self.el_spin = _dspin(-45, 80, 0, 1, 1, "°")
+        self.beam_spin = _dspin(1, 120, 20, 1, 1, "°")
+        f2.addRow("Radar bearing:", self.az_spin)
+        self.az_hint = QtWidgets.QLabel("0° = radar behind the rider, 90° = rider's left, 180° = head-on.")
+        self.az_hint.setStyleSheet(MUTED)
+        self.az_hint.setWordWrap(True)
+        f2.addRow("", self.az_hint)
+        f2.addRow("Elevation:", self.el_spin)
+        f2.addRow("Cone width (−3 dB):", self.beam_spin)
+
+        self.solver_toggle = QtWidgets.QToolButton()
+        self.solver_toggle.setText("Solver settings")
+        self.solver_toggle.setCheckable(True)
+        self.solver_toggle.setToolButtonStyle(QtCore.Qt.ToolButtonTextBesideIcon)
+        self.solver_toggle.setArrowType(QtCore.Qt.RightArrow)
+        self.solver_toggle.setAutoRaise(True)
+        self.solver_toggle.setStyleSheet("QToolButton{font-weight:600; border:none}")
+        adv.addWidget(self.solver_toggle)
+        self.solver_box = QtWidgets.QWidget()
+        f3 = QtWidgets.QFormLayout(self.solver_box)
+        f3.setContentsMargins(16, 0, 0, 0)
+        adv.addWidget(self.solver_box)
+        self.solver_box.setVisible(False)
+        self.solver_toggle.toggled.connect(self._on_solver_toggle)
+
+        mrow = QtWidgets.QHBoxLayout()
         self.mb_check = QtWidgets.QCheckBox("Multi-bounce (shooting & bouncing rays)")
         self.mb_check.setChecked(True)
+        mrow.addWidget(self.mb_check)
+        b = help_button("How multi-bounce works")
+        b.clicked.connect(lambda: self.show_docs("solver", "Step 4: shooting"))
+        mrow.addWidget(b)
+        mrow.addStretch()
+        f3.addRow(mrow)
         self.bounce_spin = QtWidgets.QSpinBox()
         self.bounce_spin.setRange(2, 8)
         self.bounce_spin.setValue(3)
+        f3.addRow("Max bounces:", self.bounce_spin)
         self.spacing_spin = _dspin(0.5, 50, 5, 0.5, 1, " mm")
-        self.adv_radar_rows = []
-        for label, w in (("Cone width (-3 dB):", self.beam_spin), ("Angle of incidence (azimuth):", self.az_spin),
-                         ("Elevation:", self.el_spin), ("", self.mb_check), ("Max bounces:", self.bounce_spin),
-                         ("Ray spacing:", self.spacing_spin)):
-            lab = QtWidgets.QLabel(label)
-            form.addRow(lab, w)
-            self.adv_radar_rows.append((lab, w))
-        self.az_hint = QtWidgets.QLabel("Azimuth: 0° = radar behind rider, 90° = rider's left, 180° = head-on.")
-        self.az_hint.setStyleSheet(MUTED)
-        self.az_hint.setWordWrap(True)
-        form.addRow(self.az_hint)
-        for w in (self.beam_spin, self.az_spin, self.el_spin, self.spacing_spin):
+        f3.addRow("Ray spacing:", self.spacing_spin)
+        self.bw_spin = _dspin(0, 5, 1, 0.25, 2, " GHz")
+        self.bw_spin.setToolTip("FMCW sweep the result is averaged over. 0 = one frequency (77 GHz).")
+        f3.addRow("Band averaging:", self.bw_spin)
+        self.nf_spin = QtWidgets.QSpinBox()
+        self.nf_spin.setRange(1, 33)
+        self.nf_spin.setValue(9)
+        self.nf_spin.setToolTip("Frequencies sampled across the band. Ray casting is shared, so each extra one is cheap.")
+        f3.addRow("Frequencies:", self.nf_spin)
+        self.aspect_check = QtWidgets.QCheckBox("Also average over ±1° of bearing (3 samples, triples solve time)")
+        f3.addRow(self.aspect_check)
+        self.solve_time = QtWidgets.QLabel("")
+        self.solve_time.setStyleSheet(MUTED)
+        f3.addRow(self.solve_time)
+
+        for w in (self.beam_spin, self.az_spin, self.el_spin, self.spacing_spin, self.bw_spin):
             w.valueChanged.connect(self._schedule)
-        self.bounce_spin.valueChanged.connect(self._schedule)
+        for w in (self.bounce_spin, self.nf_spin):
+            w.valueChanged.connect(self._schedule)
         self.mb_check.toggled.connect(self._schedule)
+        self.aspect_check.toggled.connect(self._schedule)
+
+    def _on_solver_toggle(self, on: bool):
+        self.solver_toggle.setArrowType(QtCore.Qt.DownArrow if on else QtCore.Qt.RightArrow)
+        self.solver_box.setVisible(on)
 
     def _build_faces_box(self):
         self.faces_box = g = self._group("Face materials (Advanced)")
@@ -425,8 +448,23 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("Absorptance A:", self.A_spin)
         form.addRow("Transmittance T = 1−R−A:", self.T_label)
         form.addRow("Roughness (diffuse share):", self.s_spin)
+        self.q_spin = _dspin(0, 1, 0.0, 0.05, 3)
+        self.q_spin.setToolTip("Share of the reflected power sent straight back to the radar, as by a metalens tag, "
+                               "Van Atta array or Luneburg lens. Roughness + retro share can't exceed 1.")
+        self.half_spin = _dspin(0, 89, 40, 5, 0, "°")
+        self.half_spin.setToolTip("Retro return holds up to this angle from the face normal, then rolls off over 10°.")
+        qrow = QtWidgets.QHBoxLayout()
+        qrow.addWidget(self.q_spin, 1)
+        qrow.addWidget(QtWidgets.QLabel("within ±"))
+        qrow.addWidget(self.half_spin)
+        b = help_button("How retroreflective materials work")
+        b.clicked.connect(lambda: self.show_docs("solver", "Step 3b"))
+        qrow.addWidget(b)
+        form.addRow("Retroreflective share:", qrow)
         for sp in (self.R_spin, self.A_spin):
             sp.valueChanged.connect(self._update_T)
+        for sp in (self.s_spin, self.q_spin):
+            sp.valueChanged.connect(self._update_q)
         lay.addLayout(form)
         self.mat_hint = QtWidgets.QLabel("")
         self.mat_hint.setWordWrap(True)
@@ -443,71 +481,6 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(b_obj)
         lay.addLayout(row)
         self._on_material_source()
-
-    def _build_results_box(self):
-        g = self._group("Results")
-        lay = QtWidgets.QVBoxLayout(g)
-        row = QtWidgets.QHBoxLayout()
-        self.b_compute = QtWidgets.QPushButton("Compute")
-        self.b_compute.setStyleSheet("font-weight:600; padding:6px 14px")
-        self.b_compute.clicked.connect(self.compute)
-        row.addWidget(self.b_compute)
-        self.auto_check = QtWidgets.QCheckBox("Auto-update")
-        self.auto_check.setChecked(True)
-        row.addWidget(self.auto_check)
-        row.addStretch()
-        lay.addLayout(row)
-
-        grid = QtWidgets.QGridLayout()
-        big = "font-size:20px; font-weight:600"
-        small = MUTED
-        grid.addWidget(QtWidgets.QLabel("Returning radar power"), 0, 0)
-        grid.addWidget(QtWidgets.QLabel("Total radar cross section"), 0, 1)
-        self.lbl_power = QtWidgets.QLabel("—")
-        self.lbl_rcs = QtWidgets.QLabel("—")
-        self.lbl_power.setStyleSheet(big)
-        self.lbl_rcs.setStyleSheet(big)
-        grid.addWidget(self.lbl_power, 1, 0)
-        grid.addWidget(self.lbl_rcs, 1, 1)
-        self.lbl_power_sub = QtWidgets.QLabel("")
-        self.lbl_rcs_sub = QtWidgets.QLabel("")
-        self.lbl_power_sub.setStyleSheet(small)
-        self.lbl_rcs_sub.setStyleSheet(small)
-        grid.addWidget(self.lbl_power_sub, 2, 0)
-        grid.addWidget(self.lbl_rcs_sub, 2, 1)
-        lay.addLayout(grid)
-
-        self.adv_results = QtWidgets.QWidget()
-        al = QtWidgets.QVBoxLayout(self.adv_results)
-        al.setContentsMargins(0, 6, 0, 0)
-        self.details = QtWidgets.QLabel("")
-        self.details.setWordWrap(True)
-        self.details.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        al.addWidget(self.details)
-        self.obj_table = QtWidgets.QTableWidget(0, 3)
-        self.obj_table.setHorizontalHeaderLabels(["Object", "RCS (m²)", "dBsm"])
-        self.obj_table.verticalHeader().setVisible(False)
-        self.obj_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.Stretch)
-        self.obj_table.setMaximumHeight(150)
-        al.addWidget(self.obj_table)
-        row = QtWidgets.QHBoxLayout()
-        self.heat_check = QtWidgets.QCheckBox("Show per-face RCS heat map")
-        self.heat_check.toggled.connect(lambda _: self.refresh_scene())
-        row.addWidget(self.heat_check)
-        b_sweep = QtWidgets.QPushButton("Aspect sweep 0–360°")
-        b_sweep.clicked.connect(self.sweep)
-        row.addWidget(b_sweep)
-        al.addLayout(row)
-        b_charts = QtWidgets.QPushButton("Save comparison charts…")
-        b_charts.setToolTip("Returned power vs. distance (2-50 m) from the rear, both sides and the front, "
-                            "for the biker alone and with the ticked attachments. Saves two PNGs and a CSV.")
-        b_charts.clicked.connect(self.save_charts)
-        al.addWidget(b_charts)
-        lay.addWidget(self.adv_results)
-        self.notes = QtWidgets.QLabel("")
-        self.notes.setWordWrap(True)
-        self.notes.setStyleSheet("color:#d08a00")
-        lay.addWidget(self.notes)
 
     # ------------------------------------------------------------------ #
     # State helpers
@@ -536,23 +509,35 @@ class MainWindow(QtWidgets.QMainWindow):
             distance_m=d, azimuth_deg=self.az_spin.value(), elevation_deg=self.el_spin.value(),
             beam_width_deg=self.beam_spin.value(), multibounce=self.mb_check.isChecked(),
             max_bounces=self.bounce_spin.value(), ray_spacing_m=self.spacing_spin.value() / 1000,
+            bandwidth_hz=self.bw_spin.value() * 1e9, n_freq=self.nf_spin.value(),
+            aspect_avg_deg=1.0 if self.aspect_check.isChecked() else 0.0,
         )
 
-    def aim_point(self) -> np.ndarray:
-        objs = self.visible_objects()
-        if not objs:
-            return np.array([0.5, 0, 0.8])
+    @staticmethod
+    def _centre(objs) -> np.ndarray:
         b = np.array([o.world_mesh().bounds for o in objs])
         lo = np.array([b[:, 0].min(), b[:, 2].min(), b[:, 4].min()])
         hi = np.array([b[:, 1].max(), b[:, 3].max(), b[:, 5].max()])
         return 0.5 * (lo + hi)
 
+    def aim_point(self) -> np.ndarray:
+        """The radar aims at the biker's centre whenever the biker is shown, so adding or moving a part never
+        moves the aim. That keeps the comparison with the biker alone like-for-like."""
+        if self.cb_biker.isChecked():
+            return self._centre(self.biker)
+        objs = self.visible_objects()
+        if not objs:
+            return np.array([0.5, 0, 0.8])
+        return self._centre(objs)
+
     def _schedule(self, *_):
         self.result = None
+        self.compare_tab.mark_stale()
         if self.auto_check.isChecked():
             self._debounce.start()
         else:
-            self.refresh_scene()
+            self.summary_sub.setText("Out of date. Press Compute.")
+        self.refresh_scene()
 
     # ------------------------------------------------------------------ #
     # Mode / list management
@@ -560,14 +545,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def apply_mode(self):
         adv = self.advanced
         self.simple_radar_note.setVisible(not adv)
-        for lab, w in self.adv_radar_rows:
-            lab.setVisible(adv)
-            w.setVisible(adv)
-        self.az_hint.setVisible(adv)
+        self.adv_radar.setVisible(adv)
         self.faces_box.setVisible(adv)
-        self.adv_results.setVisible(adv)
+        self.results_tab.set_advanced(adv)
         if not adv:
-            self.heat_check.setChecked(False)
             self.clear_selection(refresh=False)
         self.view_hint.setText("Advanced: click a surface to select it" if adv else "Simple mode: click an object to select it")
         self.refresh_object_list()
@@ -648,7 +629,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.obj_mat_combo.setCurrentIndex(dominant)
             self.obj_mat_mixed.setText("(mixed)" if len(mats) > 1 else "")
             m = self.lib[dominant]
+            self.obj_mat_estimate.setVisible(m.note != "Custom")
             self.obj_mat_info.setText(f"R {m.reflectance:.2f} · A {m.absorptance:.2f} · T {m.transmittance:.2f} · rough {m.roughness:.2f}"
+                                      + (f" · retro {m.retro:.3g} within ±{m.retro_half_angle_deg:.0f}°" if m.retro > 0 else "")
                                       + (f" — {m.note}" if m.note else ""))
         for w in self.transform_widgets:
             w.blockSignals(False)
@@ -672,7 +655,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_distance(self, v: float):
         self.dist_slider.blockSignals(True)
-        self.dist_slider.setValue(int(round(v * 10)))
+        self.dist_slider.setValue(_dist_to_slider(v))
         self.dist_slider.blockSignals(False)
         self._schedule()
 
@@ -708,9 +691,8 @@ class MainWindow(QtWidgets.QMainWindow):
         elif size.max() < 0.02:
             QtWidgets.QMessageBox.warning(self, "Tiny part",
                 f"This part is only {size.max() * 1000:.1f} mm across. If that's wrong, re-import with different units or use Scale.")
-        if mesh.n_cells > 300_000:
-            QtWidgets.QMessageBox.information(self, "Dense mesh",
-                f"{mesh.n_cells:,} triangles. This will work but computes slowly; decimating in your CAD tool helps.")
+        if mesh.n_cells > DECIMATE_OFFER:
+            mesh = self._offer_decimate(mesh)
         obj = geo.make_attachment(Path(path).stem, mesh, self.lib.index("ABS / hard plastic"), self.cb_biker.isChecked(),
                                   mount="head")
         self.attachments.append(obj)
@@ -718,12 +700,41 @@ class MainWindow(QtWidgets.QMainWindow):
         self.fit_view(False)
         self._schedule()
 
+    def _offer_decimate(self, mesh: pv.PolyData) -> pv.PolyData:
+        """Dense CAD exports slow every solve down. Offer to thin them, showing the face count before and after."""
+        n = mesh.n_cells
+        target, ok = QtWidgets.QInputDialog.getInt(
+            self, "Dense mesh",
+            f"This part has {n:,} triangles, which slows every solve.\n\n"
+            "Decimate to how many triangles? Keep the original count to skip.\n"
+            "Of note, flat faces survive decimation well; tight curves can turn faceted, "
+            "which makes their glints spikier at 77 GHz.",
+            min(n, 40_000), 1_000, n, 1_000)
+        if not ok or target >= n:
+            return mesh
+        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        try:
+            out = mesh.decimate(1.0 - target / n).triangulate().clean(tolerance=1e-9)
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        if out.n_cells == 0:
+            QtWidgets.QMessageBox.warning(self, "Decimation failed", "Decimation removed every face; keeping the original.")
+            return mesh
+        self.statusBar().showMessage(f"Decimated from {n:,} to {out.n_cells:,} triangles.", 8000)
+        QtWidgets.QMessageBox.information(self, "Decimated", f"Decimated from {n:,} to {out.n_cells:,} triangles.")
+        return out
+
     def add_sample(self, kind: str):
         al = self.lib.index("Aluminum")
         if kind == "corner":
             mesh, name = geo.corner_reflector(0.10, opening=(-1, 0, 0)), "Corner reflector"
         elif kind == "plate":
             mesh, name = geo.flat_plate(0.10, normal=(-1, 0, 0)), "Flat plate"
+        elif kind in ("metalens", "retro"):
+            # A 53 mm tag, the size in Ghasemi et al. 2026, facing a radar behind the rider
+            mesh = geo.flat_plate(0.053, normal=(-1, 0, 0))
+            name, al = (("Metalens retro tag", self.lib.index("Metalens retro tag (measured)")) if kind == "metalens"
+                        else ("Ideal retroreflector", self.lib.index("Retroreflector (ideal)")))
         else:
             mesh, name = geo.sphere((0, 0, 0), 0.05), "Sphere"
         obj = geo.make_attachment(name, mesh, al, self.cb_biker.isChecked())
@@ -798,16 +809,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_lpress(self, iren, _evt):
         self._press_pos = iren.GetEventPosition()
 
-    def _pick(self, x: int, y: int):
-        picker = vtkCellPicker()
-        picker.SetTolerance(0.0005)
-        if not picker.Pick(x, y, 0, self.plotter.renderer):
-            return None, -1
-        actor, cell = picker.GetActor(), picker.GetCellId()
-        if actor is None or cell < 0:
-            return None, -1
-        return self.actor_map.get(actor.GetAddressAsString("vtkObject")), cell
-
     def _on_lrelease(self, iren, _evt):
         if self._press_pos is None:
             return
@@ -844,51 +845,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_sel_label()
         self._recolor()
 
-    def _zoom_at_cursor(self, factor: float):
-        """Dolly toward (factor > 1) or away from the point under the cursor, keeping that point fixed on screen."""
-        ren = self.plotter.renderer
-        cam = ren.GetActiveCamera()
-        x, y = self.plotter.iren.interactor.GetEventPosition()
-        picker = vtkCellPicker()
-        picker.SetTolerance(0.0005)
-        if picker.Pick(x, y, 0, ren) and picker.GetCellId() >= 0:
-            target = np.array(picker.GetPickPosition())
-        else:  # empty space: use the point under the cursor at the focal-plane depth
-            ren.SetWorldPoint(*cam.GetFocalPoint(), 1.0)
-            ren.WorldToDisplay()
-            z = ren.GetDisplayPoint()[2]
-            ren.SetDisplayPoint(x, y, z)
-            ren.DisplayToWorld()
-            w = np.array(ren.GetWorldPoint())
-            target = w[:3] / w[3]
-        pos, fp = np.array(cam.GetPosition()), np.array(cam.GetFocalPoint())
-        cam.SetPosition(*(target + (pos - target) / factor))
-        cam.SetFocalPoint(*(target + (fp - target) / factor))
-        ren.ResetCameraClippingRange()
-        self.plotter.render()
-
     def _recolor(self):
         """Repaint material colours and the selection highlight without rebuilding the scene."""
-        _, _, _, rgb_lib = self.lib.arrays()
-        for obj in self.visible_objects():
-            m = self.mesh_map.get(id(obj))
-            if m is None:  # heat map is showing, or the scene is stale
-                self.refresh_scene()
-                return
-            colors = rgb_lib[obj.face_mat].copy()
-            sel = self.selection.get(id(obj))
-            if sel:
-                colors[list(sel)] = HIGHLIGHT
-            m.cell_data["colors"][:] = colors
-            m.Modified()
-        self.plotter.render()
+        self._paint()
 
     # ------------------------------------------------------------------ #
     # Materials (advanced)
     # ------------------------------------------------------------------ #
     def _on_material_source(self, *_):
         custom = self.rb_custom.isChecked()
-        for w in (self.R_spin, self.A_spin, self.s_spin):
+        for w in (self.R_spin, self.A_spin, self.s_spin, self.q_spin, self.half_spin):
             w.setEnabled(custom)  # preset values are shown read-only, so a preset can't be edited by accident
         for w in (self.custom_name_label, self.custom_row):
             w.setVisible(custom)
@@ -915,7 +881,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if i < 0:
             return
         m = self.lib[i]
-        for sp, v in ((self.R_spin, m.reflectance), (self.A_spin, m.absorptance), (self.s_spin, m.roughness)):
+        for sp, v in ((self.R_spin, m.reflectance), (self.A_spin, m.absorptance), (self.s_spin, m.roughness),
+                      (self.q_spin, m.retro), (self.half_spin, m.retro_half_angle_deg)):
             sp.blockSignals(True)
             sp.setValue(v)
             sp.blockSignals(False)
@@ -930,18 +897,26 @@ class MainWindow(QtWidgets.QMainWindow):
             A = 1 - R
         self.T_label.setText(f"{max(0.0, 1 - R - A):.3f}")
 
+    def _update_q(self, *_):
+        if self.s_spin.value() + self.q_spin.value() > 1:  # diffuse + retro shares of the reflected power
+            self.q_spin.blockSignals(True)
+            self.q_spin.setValue(1 - self.s_spin.value())
+            self.q_spin.blockSignals(False)
+
     def _material_to_assign(self) -> int:
         """Library index for the panel's current material, adding a custom material if needed."""
         if not self.rb_custom.isChecked():
             return self.face_mat_combo.currentIndex()
         R, A, s = self.R_spin.value(), self.A_spin.value(), self.s_spin.value()
+        q, half = self.q_spin.value(), self.half_spin.value()
         name = self.custom_name.text().strip() or "Custom material"
         # Re-assigning the same custom material reuses its entry instead of piling up copies
         for i, m in enumerate(self.lib.materials):
             if (m.name == name and m.color == self._custom_color and abs(m.reflectance - R) < 1e-9
-                    and abs(m.absorptance - A) < 1e-9 and abs(m.roughness - s) < 1e-9):
+                    and abs(m.absorptance - A) < 1e-9 and abs(m.roughness - s) < 1e-9
+                    and abs(m.retro - q) < 1e-9 and abs(m.retro_half_angle_deg - half) < 1e-9):
                 return i
-        idx = self.lib.add(name, R, A, s, self._custom_color)
+        idx = self.lib.add(name, R, A, s, self._custom_color, retro=q, retro_half_angle_deg=half)
         self.lib[idx].note = "Custom"
         self.refresh_material_combos()
         self.face_mat_combo.blockSignals(True)
@@ -979,344 +954,133 @@ class MainWindow(QtWidgets.QMainWindow):
     # Compute & display
     # ------------------------------------------------------------------ #
     def compute(self):
-        from .geometry import build_target
-
-        objs = self.visible_objects()
-        target, spans = build_target(objs, self.lib)
+        self._debounce.stop()
+        target, spans = geo.build_target(self.visible_objects(), self.lib)
         if target is None:
-            self.result, self.spans = None, []
-            self.lbl_power.setText("—")
-            self.lbl_rcs.setText("—")
-            self.lbl_power_sub.setText("No geometry in the scene")
-            self.lbl_rcs_sub.setText("")
+            self._gen += 1
+            self.result, self.base_result, self.spans = None, None, []
+            self.results_tab.show_empty("No geometry in the scene.")
+            self.summary.setText("—")
+            self.summary_sub.setText("No geometry in the scene")
             self.refresh_scene()
             return
-        QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
-        try:
-            radar = self.radar_settings()
-            res = compute_rcs(target, radar, self.aim_point())
-        finally:
-            QtWidgets.QApplication.restoreOverrideCursor()
-        self.result, self.spans = res, spans
-        self.lbl_power.setText(_fmt_pct(res.returned_fraction))
-        self.lbl_power_sub.setText(f"of transmitted power ({res.returned_db:.1f} dB)")
-        self.lbl_rcs.setText(f"{res.rcs_m2:.3g} m²")
-        self.lbl_rcs_sub.setText(f"{res.rcs_dbsm:+.1f} dBsm")
-        self.details.setText(
-            f"<b>Breakdown</b> — specular {res.specular_m2:.3g} m² · diffuse {res.diffuse_m2:.3g} m² · "
-            f"multi-bounce {res.multibounce_m2:.3g} m² (these add coherently, so they need not sum to the total).<br>"
-            f"<b>Beam on target</b> — {100 * res.intercepted_fraction:.2f}% of transmitted power hits the object. "
-            f"Of that, {res.reflected_pct:.0f}% is reflected, {res.absorbed_pct:.0f}% absorbed, "
-            f"{res.passed_through_pct:.0f}% passes through.<br>"
-            f"<b>Radar</b> — gain {res.gain_dbi:.1f} dBi · {res.lit_faces:,} lit faces · "
-            f"{res.rays_launched:,} rays ({res.multibounce_rays:,} multi-bounce returns)"
-        )
-        self.obj_table.setRowCount(len(res.object_rcs_m2))
-        for i, (name, val) in enumerate(sorted(res.object_rcs_m2.items(), key=lambda kv: -kv[1])):
-            self.obj_table.setItem(i, 0, QtWidgets.QTableWidgetItem(name))
-            self.obj_table.setItem(i, 1, QtWidgets.QTableWidgetItem(f"{val:.4g}"))
-            self.obj_table.setItem(i, 2, QtWidgets.QTableWidgetItem(f"{10 * np.log10(max(val, 1e-30)):.1f}"))
-        self.notes.setText("\n".join(res.notes))
-        self.refresh_scene()
+        radar, aim = self.radar_settings(), self.aim_point()
+        parts = [o for o in self.attachments if o.visible]
+        base_key = base_target = None
+        if self.cb_biker.isChecked() and parts:
+            base_key = cmp.baseline_key(radar, [o.face_mat for o in self.biker], cmp.library_values(self.lib), aim)
+            if self.baseline.get(base_key) is None:
+                base_target, _ = geo.build_target(self.biker, self.lib)
+        self._gen += 1
+        self.solver.request(SolveRequest(
+            self._gen, target, radar, aim, base_target, base_key,
+            extra=dict(spans=spans, parts={o.name for o in parts}, biker=self.cb_biker.isChecked())))
+        self.summary_sub.setText("Solving…" + (" (and the biker alone, for comparison)" if base_target is not None else ""))
 
-    def refresh_scene(self):
-        p = self.plotter
-        cam = None if self._first_render else p.camera_position
-        p.clear()
-        self.actor_map = {}
-        self.mesh_map = {}
-        _, _, _, rgb_lib = self.lib.arrays()
-        adv = self.advanced
-        heat = adv and self.heat_check.isChecked() and self.result is not None
-        face_db = None
-        if heat:
-            face_db = 10 * np.log10(np.maximum(self.result.face_rcs_m2, 1e-12))
-            top = face_db.max()
-            clim = (top - 50, top)
-        span_map = {id(o): (a, b) for o, a, b in self.spans}
-        bar_shown = False
-        for obj in self.visible_objects():
-            m = obj.world_mesh().copy()
-            if heat and id(obj) in span_map:
-                a, b = span_map[id(obj)]
-                m.cell_data["RCS per face (dBsm)"] = face_db[a:b]
-                actor = p.add_mesh(m, scalars="RCS per face (dBsm)", cmap="inferno", clim=clim, show_scalar_bar=not bar_shown,
-                                   scalar_bar_args=dict(title="RCS per face (dBsm)", color="#0b0b0b", vertical=True))
-                bar_shown = True
+    def _on_solved(self, reply: SolveReply):
+        req = reply.request
+        if reply.base_result is not None and req.base_key:
+            self.baseline.put(req.base_key, reply.base_result)
+        if req.gen != self._gen:
+            return  # the scene changed while this was solving; a newer request is queued
+        if reply.error:
+            self.summary_sub.setText("Solve failed.")
+            QtWidgets.QMessageBox.critical(self, "Solve failed", reply.error[-2000:])
+            return
+        ex = req.extra
+        res = reply.result
+        base = self.baseline.get(req.base_key) if req.base_key else None
+        if base is None:
+            if not ex["biker"]:
+                reason = "The baseline biker is hidden, so there's nothing to compare against. Tick “Show baseline biker”."
             else:
-                colors = rgb_lib[obj.face_mat].copy()
-                sel = self.selection.get(id(obj))
-                if sel:
-                    colors[list(sel)] = HIGHLIGHT
-                m.cell_data["colors"] = colors
-                actor = p.add_mesh(m, scalars="colors", rgb=True, ambient=0.25, diffuse=0.8, specular=0.15)
-                self.mesh_map[id(obj)] = m
-            self.actor_map[actor.GetAddressAsString("vtkObject")] = obj
+                reason = "No attachments in the scene yet, so this is the biker alone. Add or import a part to see what it changes."
+        else:
+            reason = ""
+        self.result, self.base_result, self.spans = res, base, ex["spans"]
+        self._result_radar = req.radar
+        self.results_tab.show_result(res, base, req.radar, ex["parts"], reason)
+        self.solve_time.setText(f"Last solve: {reply.seconds:.2f} s")
+        self._update_summary()
+        self._paint()
 
-        # ---- radar, beam cone, distance ----
-        radar = self.radar_settings()
-        aim = self.aim_point()
-        p_r = radar.position(aim)
-        bore = (aim - p_r) / radar.distance_m
-        L = radar.distance_m * 1.08
-        half = np.radians(radar.beam_width_deg / 2)
-        cone = pv.Cone(center=p_r + bore * L / 2, direction=-bore, height=L, radius=L * np.tan(half), resolution=64, capping=False)
-        p.add_mesh(cone, color="#eb6834", opacity=0.10, pickable=False)
-        p.add_mesh(pv.Cube(center=p_r, x_length=0.18, y_length=0.18, z_length=0.10), color="#c0392b", pickable=False)
-        p.add_mesh(pv.Line(p_r, aim), color="#c0392b", line_width=2, pickable=False)
-        p.add_mesh(pv.Sphere(radius=0.025, center=aim), color="#c0392b", pickable=False)
-        p.add_point_labels([0.5 * (p_r + aim)], [f"{radar.distance_m:.1f} m"], font_size=16, point_size=0,
-                           shape_color="white", shape_opacity=0.8, text_color="#0b0b0b", always_visible=True, pickable=False)
-        p.add_point_labels([p_r + np.array([0, 0, 0.25])], ["Radar 77 GHz"], font_size=12, point_size=0,
-                           shape_opacity=0.0, text_color="#c0392b", always_visible=True, pickable=False)
-        # ---- road ----
-        c = 0.5 * (p_r + aim)
-        size = max(4.0, 1.3 * np.linalg.norm(p_r[:2] - aim[:2]) + 3)
-        ground = pv.Plane(center=(c[0], c[1], 0), direction=(0, 0, 1), i_size=size, j_size=size, i_resolution=20, j_resolution=20)
-        p.add_mesh(ground, color="#d9d9d4", opacity=0.5, show_edges=True, edge_color="#c4c4be", pickable=False)
-        p.add_axes()
-        p.add_text(f"Radar distance: {radar.distance_m:.1f} m   ·   azimuth {radar.azimuth_deg:.0f}°   ·   cone {radar.beam_width_deg:.0f}°",
-                   position="upper_left", font_size=11, color="#0b0b0b")
+    def _update_summary(self):
+        res, base = self.result, self.base_result
+        if res is None:
+            return
+        unit = self.results_tab.unit
+        if base is not None:
+            d = cmp.delta_db(res.rcs_m2, base.rcs_m2)
+            color = VIS_COLORS[cmp.visibility(d)]
+            self.summary.setText(f"<span style='color:{color}'>{d:+.1f} dB</span> vs. biker alone · "
+                                 f"{cmp.fmt_rcs(res.rcs_m2, unit)}")
+        else:
+            self.summary.setText(f"{cmp.fmt_rcs(res.rcs_m2, unit)} total RCS")
+        self.summary_sub.setText(cmp.sentence_case(cmp.band_text(self._result_radar)))
 
-        if self._first_render:
-            self._first_render = False
-            self.set_view("iso")
-        elif cam is not None:
-            p.camera_position = cam
-        p.render()
+    def show_docs(self, page: str, heading: str = ""):
+        self.tabs.setCurrentWidget(self.docs_tab)
+        self.docs_tab.show_page(page, heading)
 
-    # ------------------------------------------------------------------ #
-    # Views
-    # ------------------------------------------------------------------ #
-    def _bounds(self, whole: bool):
-        objs = self.visible_objects()
-        pts = [np.array(o.world_mesh().bounds).reshape(3, 2).T for o in objs]
-        if whole or not pts:
-            radar = self.radar_settings()
-            p_r = radar.position(self.aim_point())
-            pts.append(np.vstack([p_r - 0.2, p_r + 0.2]))
-        allp = np.vstack(pts)
-        lo, hi = allp.min(0), allp.max(0)
-        return [lo[0], hi[0], lo[1], hi[1], lo[2], hi[2]]
+    def _show_object_by_name(self, name: str):
+        """Results table click: select the object, switch to the 3D view and flash it."""
+        obj = next((o for o in self.visible_objects() if o.name == name), None)
+        if obj is None:
+            return
+        rows = [self.obj_list.item(i).data(QtCore.Qt.UserRole) for i in range(self.obj_list.count())]
+        if obj in rows:
+            self.obj_list.setCurrentRow(rows.index(obj))
+        self.tabs.setCurrentIndex(0)
+        self._flash_obj = obj
+        self._paint()
+        self._flash_timer.start()
 
-    def fit_view(self, whole: bool):
-        self.plotter.reset_camera(bounds=self._bounds(whole))
-        self.plotter.render()
+    def _end_flash(self):
+        self._flash_obj = None
+        self._paint()
 
-    def set_view(self, which: str):
-        p = self.plotter
-        aim = self.aim_point()
-        dirs = {"side": (0, 1, 0), "rear": (-1, 0, 0), "top": (0, 0, 1), "iso": (-1.0, 1.3, 0.8)}
-        d = np.array(dirs[which], float)
-        d /= np.linalg.norm(d)
-        up = (1, 0, 0) if which == "top" else (0, 0, 1)
-        p.camera_position = [tuple(aim + 5 * d), tuple(aim), up]
-        p.reset_camera(bounds=self._bounds(which == "iso" and self.dist_spin.value() < 15))
-        p.render()
+    def _check_engine(self):
+        name, ok = ray_engine()
+        if not ok:
+            msg = ("Embree not found. Solves will take 20 s or more instead of under a second. "
+                   f"See Setup in the README (ray engine: {name}).")
+            self.engine_banner.setText(msg)
+            self.engine_banner.setVisible(True)
+            self.statusBar().showMessage(msg)
+
+    def closeEvent(self, ev):
+        from .sweeps import shutdown_pool
+
+        self.compare_tab._cancel()
+        self.solver.shutdown()
+        shutdown_pool()
+        super().closeEvent(ev)
 
     # ------------------------------------------------------------------ #
-    # Aspect sweep
+    # Inputs for the Compare tab
     # ------------------------------------------------------------------ #
-    def sweep(self):
+    def _sweep_inputs(self):
         target, _ = geo.build_target(self.visible_objects(), self.lib)
         if target is None:
-            return
-        base = self.radar_settings()
-        aim = self.aim_point()
-        az = np.arange(0, 360, 5.0)
-        out = np.zeros_like(az)
-        dlg = QtWidgets.QProgressDialog("Sweeping angle of incidence…", "Cancel", 0, len(az), self)
-        dlg.setWindowModality(QtCore.Qt.WindowModal)
-        dlg.setMinimumDuration(0)
-        for i, a in enumerate(az):
-            if dlg.wasCanceled():
-                return
-            r = RadarSettings(**{**base.__dict__, "azimuth_deg": float(a)})
-            out[i] = compute_rcs(target, r, aim).rcs_dbsm
-            dlg.setValue(i + 1)
-            QtWidgets.QApplication.processEvents()
-        SweepDialog(self, az, out, base.azimuth_deg, base.distance_m).exec()
+            raise ValueError("There's no geometry in the scene to sweep.")
+        base_t = None
+        if self.cb_biker.isChecked() and any(o.visible for o in self.attachments):
+            base_t, _ = geo.build_target(self.biker, self.lib)
+        return target, base_t, self.aim_point(), self.radar_settings()
 
-
-    # ------------------------------------------------------------------ #
-    # Projects
-    # ------------------------------------------------------------------ #
-    def _build_menu(self):
-        menu = self.menuBar().addMenu("File")
-        for text, key, fn in (("New Project", QtGui.QKeySequence.New, self.new_project),
-                              ("Open Project…", QtGui.QKeySequence.Open, self.open_project),
-                              ("Save Project", QtGui.QKeySequence.Save, self.save_project),
-                              ("Save Project As…", QtGui.QKeySequence.SaveAs, self.save_project_as)):
-            act = QtGui.QAction(text, self)
-            act.setShortcut(key)
-            act.triggered.connect(fn)
-            menu.addAction(act)
-        self._update_title()
-
-    def _update_title(self):
-        name = self.project_path.stem if self.project_path else "Untitled"
-        self.setWindowTitle(f"{name} — Radar Detector (77 GHz bicycle RCS)")
-
-    def _gather_settings(self) -> dict:
-        s = {
-            "advanced": self.advanced,
-            "show_biker": self.cb_biker.isChecked(),
-            "distance_m": self.dist_spin.value(),
-            "beam_width_deg": self.beam_spin.value(),
-            "azimuth_deg": self.az_spin.value(),
-            "elevation_deg": self.el_spin.value(),
-            "multibounce": self.mb_check.isChecked(),
-            "max_bounces": self.bounce_spin.value(),
-            "ray_spacing_mm": self.spacing_spin.value(),
-            "auto_update": self.auto_check.isChecked(),
-            "surface_edge_angle_deg": self.grow_angle.value(),
-        }
-        if not self._first_render:
-            s["camera"] = [list(map(float, v)) for v in self.plotter.camera_position]
-        return s
-
-    def _apply_settings(self, s: dict):
-        widgets = (self.rb_simple, self.rb_adv, self.cb_biker, self.dist_spin, self.dist_slider, self.beam_spin,
-                   self.az_spin, self.el_spin, self.mb_check, self.bounce_spin, self.spacing_spin, self.auto_check,
-                   self.grow_angle)
-        for w in widgets:
-            w.blockSignals(True)
-        try:
-            d = self._default_settings
-            get = lambda k: s.get(k, d.get(k))  # noqa: E731  (older files may lack newer keys)
-            (self.rb_adv if get("advanced") else self.rb_simple).setChecked(True)
-            self.cb_biker.setChecked(bool(get("show_biker")))
-            self.dist_spin.setValue(float(get("distance_m")))
-            self.dist_slider.setValue(int(round(float(get("distance_m")) * 10)))
-            self.beam_spin.setValue(float(get("beam_width_deg")))
-            self.az_spin.setValue(float(get("azimuth_deg")))
-            self.el_spin.setValue(float(get("elevation_deg")))
-            self.mb_check.setChecked(bool(get("multibounce")))
-            self.bounce_spin.setValue(int(get("max_bounces")))
-            self.spacing_spin.setValue(float(get("ray_spacing_mm")))
-            self.auto_check.setChecked(bool(get("auto_update")))
-            self.grow_angle.setValue(float(get("surface_edge_angle_deg")))
-        finally:
-            for w in widgets:
-                w.blockSignals(False)
-
-    def _load_state(self, lib, attachments, biker_face_mats: dict, settings: dict):
-        self.lib = lib
-        self.biker = geo.build_biker(self.lib)
-        for o in self.biker:
-            fm = biker_face_mats.get(o.name)
-            if fm is not None and len(fm) == o.n_faces:
-                o.face_mat = fm
-        self.attachments = attachments
-        self.selection.clear()
-        self._adj_cache.clear()
-        self._apply_settings(settings)
-        self.refresh_material_combos()
-        self.apply_mode()  # refreshes the object list and schedules a compute
-        self._update_sel_label()
-        self._first_render = "camera" not in settings
-        if not self._first_render:
-            self.refresh_scene()
-            self.plotter.camera_position = [tuple(v) for v in settings["camera"]]
-            self.plotter.render()
-
-    def new_project(self):
-        if QtWidgets.QMessageBox.question(self, "New project", "Start a new project? Unsaved changes will be lost.") \
-                != QtWidgets.QMessageBox.Yes:
-            return
-        self.project_path = None
-        self._load_state(MaterialLibrary(), [], {}, {k: v for k, v in self._default_settings.items() if k != "camera"})
-        self._update_title()
-
-    def open_project(self):
-        from .project import EXTENSION, load_project
-
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open project", str(Path.home()),
-                                                        f"Radar Detector project (*{EXTENSION});;All files (*)")
-        if not path:
-            return
-        try:
-            proj = load_project(path)
-        except Exception as e:  # noqa: BLE001
-            QtWidgets.QMessageBox.critical(self, "Open failed", f"Could not open {path}:\n{e}")
-            return
-        self.project_path = Path(path)
-        self._load_state(proj.lib, proj.attachments, proj.biker_face_mats, proj.settings)
-        self._update_title()
-
-    def save_project(self):
-        if self.project_path is None:
-            self.save_project_as()
-        else:
-            self._write_project(self.project_path)
-
-    def save_project_as(self):
-        from .project import EXTENSION
-
-        start = str(self.project_path or Path.home() / f"radar_project{EXTENSION}")
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save project", start,
-                                                        f"Radar Detector project (*{EXTENSION})")
-        if path:
-            self._write_project(Path(path))
-
-    def _write_project(self, path: Path):
-        from .project import save_project
-
-        try:
-            self.project_path = save_project(path, self.lib, self.biker, self.attachments, self._gather_settings())
-        except Exception as e:  # noqa: BLE001
-            QtWidgets.QMessageBox.critical(self, "Save failed", f"Could not save {path}:\n{e}")
-            return
-        self._update_title()
-        self.statusBar().showMessage(f"Saved {self.project_path}", 4000)
-
-    # ------------------------------------------------------------------ #
-    # Comparison charts
-    # ------------------------------------------------------------------ #
-    def save_charts(self):
-        from .charts import ASPECTS, save_comparison
-
+    def _chart_inputs(self):
         parts = [o for o in self.attachments if o.visible]
         if not parts:
-            QtWidgets.QMessageBox.information(self, "No attachments",
-                "Import or add a part (and leave it ticked) to compare against the biker alone.")
-            return
-        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Save charts to folder", str(Path.home()))
-        if not folder:
-            return
+            raise ValueError("Import or add a part (and leave it ticked) to compare against the biker alone.")
         for o in self.biker:
             o.visible = True  # the baseline is always the full biker, even if it's hidden in the view
         try:
             base_t, _ = geo.build_target(self.biker, self.lib)
             with_t, _ = geo.build_target(self.biker + parts, self.lib)
-            # Same aim point for both runs, so the only difference is the attachments
-            b = np.array([o.world_mesh().bounds for o in self.biker])
-            aim = 0.5 * (np.array([b[:, 0].min(), b[:, 2].min(), b[:, 4].min()])
-                         + np.array([b[:, 1].max(), b[:, 3].max(), b[:, 5].max()]))
+            aim = self._centre(self.biker)  # same aim for both runs, so the only difference is the parts
         finally:
             self.objects()  # restore biker visibility from the checkbox
-        settings = self.radar_settings().__dict__
-        distances = np.arange(2.0, 50.0 + 1e-9, 2.0)
-        base_db = {n: np.zeros_like(distances) for n, _ in ASPECTS}
-        with_db = {n: np.zeros_like(distances) for n, _ in ASPECTS}
-        total = 2 * len(ASPECTS) * len(distances)
-        dlg = QtWidgets.QProgressDialog("Computing returned power vs. distance…", "Cancel", 0, total, self)
-        dlg.setWindowModality(QtCore.Qt.WindowModal)
-        dlg.setMinimumDuration(0)
-        k = 0
-        for name, az in ASPECTS:
-            for i, d in enumerate(distances):
-                r = RadarSettings(**{**settings, "azimuth_deg": az, "distance_m": float(d)})
-                for target, out in ((base_t, base_db), (with_t, with_db)):
-                    if dlg.wasCanceled():
-                        return
-                    out[name][i] = compute_rcs(target, r, aim).returned_db
-                    k += 1
-                    dlg.setValue(k)
-                    QtWidgets.QApplication.processEvents()
-        paths = save_comparison(folder, distances, base_db, with_db, [o.name for o in parts])
-        QtWidgets.QMessageBox.information(self, "Charts saved", "Saved:\n" + "\n".join(str(p) for p in paths))
-
+        return base_t, with_t, aim, self.radar_settings(), [o.name for o in parts]
 
 def main():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)

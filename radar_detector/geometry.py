@@ -289,6 +289,7 @@ def build_target(objects: list[SceneObject], lib: MaterialLibrary):
     Returns (target, spans) where spans[i] = (object, start_face, end_face).
     """
     R_lib, A_lib, s_lib, _ = lib.arrays()
+    q_lib, half_lib = lib.retro_arrays()
     verts, faces, mats, oids, names, spans = [], [], [], [], [], []
     v_off = f_off = 0
     for obj in objects:
@@ -310,6 +311,7 @@ def build_target(objects: list[SceneObject], lib: MaterialLibrary):
     target = Target(
         vertices=np.vstack(verts), faces=np.vstack(faces),
         reflectance=R_lib[mat], absorptance=A_lib[mat], roughness=s_lib[mat],
+        retro=q_lib[mat] if q_lib.any() else None, retro_half_angle_deg=half_lib[mat] if q_lib.any() else None,
         object_id=np.concatenate(oids), object_names=names,
     )
     return target, spans

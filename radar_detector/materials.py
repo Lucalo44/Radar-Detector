@@ -8,6 +8,16 @@ incidence, plus a roughness term:
     transmittance T = 1 - R - A : fraction that passes through the surface
     roughness    s : fraction of the *reflected* power that is scattered
                      diffusely (Lambertian) instead of specularly
+    retro        q : fraction of the *reflected* power sent straight back
+                     toward the source (retrodirective), within +/- the
+                     coverage half-angle of the face normal. s + q <= 1, and
+                     the specular share is 1 - s - q.
+
+Retroreflective materials stand in for tags such as metalens-based reflectors
+(Ghasemi, Hester & Eid, Sci. Rep. 2026, doi:10.1038/s41598-026-70859-x),
+Van Atta arrays and Luneburg lenses. They are modelled by what they do, not
+by their internal structure, so a flat face painted with one behaves as a
+phase-conjugating aperture.
 
 The default values are engineering estimates at 77 GHz (lambda ~= 3.9 mm)
 derived from typical complex permittivities (e.g. skin eps ~ 6.5 - j8 gives
@@ -29,11 +39,15 @@ class Material:
     roughness: float = 0.0
     color: str = "#999999"
     note: str = ""
+    retro: float = 0.0  # share of reflected power returned toward the source
+    retro_half_angle_deg: float = 40.0  # retrodirective coverage, +/- from the face normal
 
     def __post_init__(self) -> None:
         self.reflectance = float(min(max(self.reflectance, 0.0), 1.0))
         self.absorptance = float(min(max(self.absorptance, 0.0), 1.0 - self.reflectance))
         self.roughness = float(min(max(self.roughness, 0.0), 1.0))
+        self.retro = float(min(max(self.retro, 0.0), 1.0 - self.roughness))
+        self.retro_half_angle_deg = float(min(max(self.retro_half_angle_deg, 0.0), 89.0))
 
     @property
     def transmittance(self) -> float:
@@ -61,6 +75,13 @@ DEFAULT_MATERIALS: list[Material] = [
     Material("Glass", 0.18, 0.20, 0.02, "#a8d8d8", ""),
     Material("Water / wet surface", 0.60, 0.40, 0.10, "#2f7fbf", ""),
     Material("Radar absorber (RAM)", 0.01, 0.99, 0.00, "#4a2a4a", "Carbon-loaded absorber foam."),
+    # Retroreflectors. Appended at the end so existing material indices never move.
+    Material("Retroreflector (ideal)", 0.99, 0.01, 0.00, "#ff3d7f",
+             "Upper bound: every reflected watt goes back to the radar within ±60°.",
+             retro=1.0, retro_half_angle_deg=60.0),
+    Material("Metalens retro tag (measured)", 0.28, 0.72, 0.00, "#e05ad0",
+             "Fitted to Ghasemi et al. 2026: 3.54 dBsm broadside, −16.8 dBsm median over ±40° for 53 mm.",
+             retro=0.013, retro_half_angle_deg=40.0),
 ]
 
 
@@ -91,14 +112,16 @@ class MaterialLibrary:
                 return i
         raise KeyError(name)
 
-    def add(self, name: str, reflectance: float, absorptance: float, roughness: float, color: str | None = None) -> int:
+    def add(self, name: str, reflectance: float, absorptance: float, roughness: float, color: str | None = None,
+            retro: float = 0.0, retro_half_angle_deg: float = 40.0) -> int:
         name = name.strip()
         base, n = re.sub(r" \(\d+\)$", "", name) or "Custom", 1  # "Foil (2)" -> "Foil (3)", not "Foil (2) (2)"
         existing = set(self.names())
         while name in existing or not name.strip():
             n += 1
             name = f"{base} ({n})"
-        self.materials.append(Material(name, reflectance, absorptance, roughness, color or _auto_color(len(self.materials))))
+        self.materials.append(Material(name, reflectance, absorptance, roughness, color or _auto_color(len(self.materials)),
+                                       retro=retro, retro_half_angle_deg=retro_half_angle_deg))
         return len(self.materials) - 1
 
     def arrays(self):
@@ -110,3 +133,10 @@ class MaterialLibrary:
         s = np.array([m.roughness for m in self.materials])
         rgb = np.array([m.rgb for m in self.materials], dtype=np.uint8)
         return R, A, s, rgb
+
+    def retro_arrays(self):
+        """Per-material retro share q and coverage half-angle (degrees)."""
+        import numpy as np
+
+        return (np.array([m.retro for m in self.materials]),
+                np.array([m.retro_half_angle_deg for m in self.materials]))

@@ -2,6 +2,18 @@
 
 Radar Detector is a tool I built to estimate how visible a cyclist is to a car's 77GHz radar, and how much a bike or helmet attachment changes that. This page covers how to get it running.
 
+## What's new
+
+1. **The headline is now the change vs. the biker alone**, in dB and in plain words ("about 2.2× the return"), coloured by whether the part makes the rider more or less visible. The total RCS sits under it on a scale of typical pedestrian, cyclist and car values, with the size of a metal sphere that would give the same return.
+2. **Results are averaged over the radar's band** (76.5 to 77.5GHz, 9 frequencies), like a real FMCW radar. Nudging a part by a millimetre no longer swings the number by several dB.
+3. **The right side is now tabs**: Scene, Results, Compare and Docs. The aspect sweep and the distance charts run inside the Compare tab, with a progress bar and a cancel button, instead of in pop-ups or straight to disk.
+4. **The Docs tab** explains what every number means, how the solver works step by step, what it leaves out, the materials and how the solver is validated. The same pages are in [docs/](docs/).
+5. **It's faster.** Solving runs in the background so the window never freezes. A single solve takes about 0.15s, the 72-angle sweep about 1.4s (it was 25s) and the 200-solve chart set about 5s (it was 70s).
+6. **The heat map is available in Simple mode too**, and dense imports can be decimated on the way in.
+7. **Retroreflective materials.** Faces can now send a share of their reflected power straight back to the radar over a set coverage angle, like a metalens tag or Van Atta array. Two presets come with it: an ideal retroreflector, and one fitted to the measured 53mm metalens tag in Ghasemi, Hester and Eid (*Scientific Reports*, 2026). Both are under "Add sample" as 53mm tags.
+
+Of note, two numbers changed on purpose. Each object's value in the table now adds its multi-bounce return coherently, which a corner reflector needs (it used to show up as 11% of a return it made 97% of). The radar also now always aims at the biker's centre when the biker is shown, so adding a part never moves the aim.
+
 ## Setup
 
 It needs Python 3.10 or newer. I developed it on 3.12 on a Mac. To check your version, run `python3 --version`.
@@ -32,7 +44,26 @@ To make sure the physics is behaving, run the test suite:
 python -m pytest tests
 ```
 
-All 7 tests should pass in a few seconds. They compare the solver against closed-form answers for a 10cm flat plate, sphere and corner reflector.
+All 46 tests should pass in a few seconds. Seven of them compare the solver against closed-form answers for a 10cm flat plate, sphere and corner reflector. The rest are described in the Docs tab under Validation, and in [docs/validation.md](docs/validation.md).
+
+To check which ray-casting engine is active and time one solve, run:
+
+```bash
+python run.py --check
+```
+
+The last lines should read `Ray engine  trimesh.ray.ray_pyembree.RayMeshIntersector` and a test solve of under a second.
+
+## If solves are slow
+
+The tool relies on Embree (installed as `embreex`) for ray casting. If it's missing, trimesh quietly falls back to a pure-Python ray tracer. Nothing breaks, but a single solve goes from under a second to 20s or more, and a sweep becomes impractical. The app shows an amber banner across the top when this happens.
+
+Embree installs on Intel and Apple Silicon Macs, Windows and x86-64 Linux. Linux on ARM has no prebuilt wheel, so `requirements.txt` skips it there. To try installing it by hand:
+
+```bash
+pip install embreex
+python run.py --check
+```
 
 ## Running it again later
 
@@ -75,3 +106,5 @@ Returned power comes from the monostatic radar equation, with an ideal Gaussian-
 P_returned / P_transmitted = G²·λ²·σ / ((4π)³·R⁴)
 
 That 1/R⁴ term is why returned power drops by roughly 50dB between 2m and 50m, even when σ barely changes. The tool also reports what share of the transmitted power lands on the target and how much of that is reflected, absorbed or passed through. It ignores losses, ground-plane multipath, polarization, edge diffraction and the change in reflectance with angle.
+
+The Docs tab in the app goes through each step in more detail, with a diagram per step, along with what the numbers mean and what the solver leaves out.

@@ -46,3 +46,21 @@ def test_rejects_other_files(tmp_path):
         np.savez(f, a=np.zeros(3))
     with pytest.raises(ValueError):
         load_project(p)
+
+
+def test_retro_material_round_trip(tmp_path):
+    """Custom retroreflective materials keep their retro share and coverage through save and open,
+    and a retro edit invalidates the cached biker-alone result."""
+    from radar_detector import compare as cmp
+
+    lib = MaterialLibrary()
+    idx = lib.add("My tag", 0.5, 0.5, 0.0, retro=0.3, retro_half_angle_deg=55.0)
+    biker = geo.build_biker(lib)
+    proj = load_project(save_project(tmp_path / "retro", lib, biker, [], {}))
+    m = proj.lib[idx]
+    assert m.retro == pytest.approx(0.3) and m.retro_half_angle_deg == pytest.approx(55.0)
+    assert proj.lib[proj.lib.index("Metalens retro tag (measured)")].retro == pytest.approx(0.013)
+
+    before = cmp.library_values(lib)
+    lib[idx].retro = 0.4
+    assert cmp.library_values(lib) != before

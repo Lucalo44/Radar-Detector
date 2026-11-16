@@ -6,6 +6,10 @@ PySide6>=6.6
 vtk>=9.3
 trimesh>=4.0
 rtree>=1.2
+# Embree makes ray casting ~100x faster. It installs on Intel and Apple Silicon Macs (macOS reports
+# arm64, which this marker allows), Windows and x86-64 Linux. Linux on ARM (aarch64) has no wheel, so
+# it's skipped there and the app falls back to trimesh's slow ray tracer. `python run.py --check`
+# says which one is active.
 embreex>=2.17 ; platform_machine != "aarch64"
 matplotlib>=3.8
 pytest>=8

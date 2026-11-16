@@ -27,16 +27,14 @@ def _style(ax):
     ax.tick_params(colors=INK2, labelsize=8)
 
 
-def save_comparison(folder: str | Path, distances: np.ndarray, base_db: dict[str, np.ndarray],
-                    with_db: dict[str, np.ndarray], attachment_names: list[str], ref_distance: float = 10.0) -> list[Path]:
-    """Write the two charts and a CSV of every value. Returns the paths written.
+def comparison_figures(distances: np.ndarray, base_db: dict[str, np.ndarray], with_db: dict[str, np.ndarray],
+                       attachment_names: list[str], ref_distance: float = 10.0):
+    """The two comparison charts as matplotlib Figures: (power vs. distance, attachment effect).
 
     base_db / with_db map aspect name -> returned power (dB re transmitted) at each distance.
     """
     from matplotlib.figure import Figure  # no pyplot, so this never touches the Qt app's backend
 
-    folder = Path(folder)
-    folder.mkdir(parents=True, exist_ok=True)
     parts = ", ".join(attachment_names) if attachment_names else "attachments"
     names = [n for n, _ in ASPECTS]
     i_ref = int(np.argmin(np.abs(distances - ref_distance)))
@@ -86,8 +84,7 @@ def save_comparison(folder: str | Path, distances: np.ndarray, base_db: dict[str
     handles, labels = first.get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper right", frameon=False, fontsize=9, labelcolor=INK, ncol=2)
     fig.suptitle("Returned radar power vs. distance", x=0.06, ha="left", color=INK, fontsize=12)
-    p_power = folder / "returned_power_vs_distance.png"
-    fig.savefig(p_power, dpi=200)
+    fig_power = fig
 
     # ---- 2. what the attachments add, all aspects on one axis ----
     fig = Figure(figsize=(9, 5), facecolor=SURFACE)
@@ -114,8 +111,20 @@ def save_comparison(folder: str | Path, distances: np.ndarray, base_db: dict[str
     ax.set_title(f"Effect of {parts} on returned radar power", color=INK, fontsize=12, loc="left")
     ax.legend(frameon=False, fontsize=9, labelcolor=INK, loc="upper left", ncol=4)
     fig.tight_layout()
+    return fig_power, fig
+
+
+def save_comparison(folder: str | Path, distances: np.ndarray, base_db: dict[str, np.ndarray],
+                    with_db: dict[str, np.ndarray], attachment_names: list[str], ref_distance: float = 10.0) -> list[Path]:
+    """Write the two charts and a CSV of every value. Returns the paths written."""
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    names = [n for n, _ in ASPECTS]
+    fig_power, fig_delta = comparison_figures(distances, base_db, with_db, attachment_names, ref_distance)
+    p_power = folder / "returned_power_vs_distance.png"
+    fig_power.savefig(p_power, dpi=200)
     p_delta = folder / "attachment_effect_vs_distance.png"
-    fig.savefig(p_delta, dpi=200)
+    fig_delta.savefig(p_delta, dpi=200)
 
     # ---- 3. the numbers ----
     p_csv = folder / "returned_power_vs_distance.csv"
@@ -128,3 +137,53 @@ def save_comparison(folder: str | Path, distances: np.ndarray, base_db: dict[str
                 row += [f"{base_db[n][i]:.3f}", f"{with_db[n][i]:.3f}", f"{with_db[n][i] - base_db[n][i]:.3f}"]
             w.writerow(row)
     return [p_power, p_delta, p_csv]
+
+
+# --------------------------------------------------------------------------- #
+# Aspect sweep
+# --------------------------------------------------------------------------- #
+SWEEP_MARK = "#eb6834"
+
+
+def sweep_figure(az: np.ndarray, dbsm: np.ndarray, current_az: float, distance: float, base_dbsm: np.ndarray | None = None):
+    """Polar plot of total RCS against radar bearing. Returns (figure, axes)."""
+    from matplotlib.figure import Figure
+
+    fig = Figure(figsize=(5.5, 5.5), facecolor=SURFACE)
+    ax = fig.add_subplot(projection="polar", facecolor=SURFACE)
+    ax.set_theta_zero_location("S")  # 0 deg (radar behind rider) at the bottom, rider faces up
+    ax.set_theta_direction(-1)  # 90 deg = rider's left
+    th = np.radians(np.append(az, az[0] + 360))
+    if base_dbsm is not None:
+        ax.plot(th, np.append(base_dbsm, base_dbsm[0]), color=BASE_COLOR, lw=1.5, ls=(0, (4, 3)), label="Biker alone")
+    ax.plot(th, np.append(dbsm, dbsm[0]), color=WITH_COLOR, lw=2, label="Current scene")
+    cur = float(np.interp(current_az % 360, np.append(az, 360), np.append(dbsm, dbsm[0])))
+    ax.plot([np.radians(current_az)], [cur], "o", ms=9, color=SWEEP_MARK, mec=SURFACE, mew=2)
+    ax.annotate(f"current {current_az:.0f}°: {cur:+.1f} dBsm", (np.radians(current_az), cur),
+                xytext=(12, 8), textcoords="offset points", color=INK, fontsize=9)
+    vals = dbsm if base_dbsm is None else np.concatenate([dbsm, base_dbsm])
+    ax.set_ylim(np.floor(vals.min() / 5) * 5, np.ceil(vals.max() / 5) * 5 + 2)
+    ax.grid(color="#d8d7d2", lw=0.6)
+    ax.spines["polar"].set_color("#d8d7d2")
+    ax.tick_params(colors=INK2, labelsize=8)
+    ax.set_xticks(np.radians([0, 45, 90, 135, 180, 225, 270, 315]))
+    ax.set_xticklabels(["0° rear", "45°", "90° left", "135°", "180° front", "225°", "270° right", "315°"])
+    ax.set_rlabel_position(22.5)
+    ax.set_title(f"Total RCS (dBsm) vs. radar bearing, {distance:.1f} m", color=INK, fontsize=11, pad=18)
+    if base_dbsm is not None:
+        ax.legend(frameon=False, fontsize=8, labelcolor=INK, loc="lower left", bbox_to_anchor=(-0.12, -0.12))
+    fig.tight_layout()
+    return fig, ax
+
+
+def save_sweep_csv(path: str | Path, az: np.ndarray, dbsm: np.ndarray, base_dbsm: np.ndarray | None = None) -> Path:
+    path = Path(path)
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["azimuth_deg", "rcs_dbsm", "rcs_m2"] + (["biker_alone_dbsm", "delta_db"] if base_dbsm is not None else []))
+        for i, (a, d) in enumerate(zip(az, dbsm)):
+            row = [f"{a:.1f}", f"{d:.3f}", f"{10 ** (d / 10):.6g}"]
+            if base_dbsm is not None:
+                row += [f"{base_dbsm[i]:.3f}", f"{d - base_dbsm[i]:.3f}"]
+            w.writerow(row)
+    return path

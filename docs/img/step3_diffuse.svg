@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="180" viewBox="0 0 600 180" font-family="Helvetica, Arial, sans-serif" font-size="12">
+  <rect width="600" height="180" fill="#ffffff"/>
+  <text x="20" y="22" fill="#0b0b0b" font-weight="bold">Step 3: diffuse share, added as power</text>
+  <path d="M120 140 q10 -8 20 0 q10 8 20 0 q10 -8 20 0 q10 8 20 0 q10 -8 20 0 q10 8 20 0 q10 -8 20 0" fill="none" stroke="#8c8b85" stroke-width="2"/>
+  <line x1="60" y1="50" x2="190" y2="138" stroke="#2a78d6" stroke-width="1.5"/>
+  <g stroke="#eb6834" stroke-width="1.5">
+    <line x1="190" y1="138" x2="150" y2="70"/><line x1="190" y1="138" x2="190" y2="60"/>
+    <line x1="190" y1="138" x2="230" y2="70"/><line x1="190" y1="138" x2="120" y2="100"/>
+    <line x1="190" y1="138" x2="260" y2="100"/>
+  </g>
+  <text x="300" y="70" fill="#0b0b0b">rough share s of reflected power: Lambertian</text>
+  <text x="300" y="92" fill="#0b0b0b">σ_face = 4·R·s·A·cos²θ</text>
+  <text x="300" y="114" fill="#52514e">no phase, so it can't cancel</text>
+</svg>
